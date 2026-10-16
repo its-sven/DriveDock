@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal app
+        run: SIGN_IDENTITY=- scripts/build-app.sh --universal
+
+      - name: Verify bundle
+        run: |
+          lipo -info build/DriveDock.app/Contents/MacOS/DriveDock
+          codesign --verify --deep --strict build/DriveDock.app

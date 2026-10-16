@@ -1,0 +1,20 @@
+# Build output
+.build/
+build/
+dist/
+*.dmg
+*.zip
+
+# Swift Package Manager / Xcode
+.swiftpm/
+xcuserdata/
+DerivedData/
+*.xcodeproj/
+
+# Signing material – never commit
+release-cert/
+*.p12
+*.pem
+
+# macOS
+.DS_Store
