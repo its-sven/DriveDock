@@ -82,7 +82,9 @@ jobs:
           SHA256="$(shasum -a 256 "dist/DriveDock-$VERSION.zip" | cut -d' ' -f1)"
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/its-sven/homebrew-tap.git" tap
           mkdir -p tap/Casks
-          sed -e "s/__VERSION__/$VERSION/" -e "s/__SHA256__/$SHA256/" packaging/homebrew/drivedock.rb > tap/Casks/drivedock.rb
+          sed -e "s/__VERSION__/$VERSION/" -e "s/__SHA256__/$SHA256/" \
+              -e '/^# Template for the cask/d' -e '/^# The release workflow fills in/d' \
+              packaging/homebrew/drivedock.rb > tap/Casks/drivedock.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
