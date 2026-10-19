@@ -49,15 +49,15 @@ struct StatusDot: View {
 extension ConnectionStatus {
     var shortLabel: String {
         switch self {
-        case .disconnected: "Nicht verbunden"
-        case .paused: "Getrennt"
-        case .connecting: "Verbinde …"
-        case .connected: "Verbunden"
-        case .partial(let mounted, let total, _): "\(mounted) von \(total) verbunden"
-        case .unreachable: "Nicht erreichbar"
-        case .needsPassword: "Passwort fehlt"
-        case .authFailed: "Anmeldung fehlgeschlagen"
-        case .error: "Fehler"
+        case .disconnected: tr("Not connected")
+        case .paused: tr("Disconnected")
+        case .connecting: tr("Connecting …")
+        case .connected: tr("Connected")
+        case .partial(let mounted, let total, _): tr("%lld of %lld connected", mounted, total)
+        case .unreachable: tr("Not reachable")
+        case .needsPassword: tr("Password missing")
+        case .authFailed: tr("Login failed")
+        case .error: tr("Error")
         }
     }
 
@@ -94,7 +94,7 @@ struct ShareChip: View {
         }
         .buttonStyle(.plain)
         .disabled(!mounted)
-        .help(denied ? "Kein Zugriff für diesen Benutzer" : (mounted ? "Im Finder öffnen" : "Nicht verbunden"))
+        .help(denied ? tr("No access for this user") : (mounted ? tr("Open in Finder") : tr("Not connected")))
     }
 }
 

@@ -12,7 +12,7 @@ enum ServiceKind: String, Codable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .smb: "SMB (Windows / NAS)"
+        case .smb: tr("SMB (Windows / NAS)")
         case .webdav: "WebDAV (http)"
         case .webdavs: "WebDAV (https)"
         }
@@ -58,16 +58,16 @@ enum ServerColor: String, Codable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .blue: "Blau"
-        case .indigo: "Indigo"
-        case .purple: "Lila"
-        case .pink: "Pink"
-        case .red: "Rot"
-        case .orange: "Orange"
-        case .yellow: "Gelb"
-        case .green: "Grün"
-        case .teal: "Türkis"
-        case .graphite: "Graphit"
+        case .blue: tr("Blue")
+        case .indigo: tr("Indigo")
+        case .purple: tr("Purple")
+        case .pink: tr("Pink")
+        case .red: tr("Red")
+        case .orange: tr("Orange")
+        case .yellow: tr("Yellow")
+        case .green: tr("Green")
+        case .teal: tr("Teal")
+        case .graphite: tr("Graphite")
         }
     }
 }
@@ -85,9 +85,9 @@ enum AddressMode: String, Codable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .automatic: "Automatisch"
-        case .ipAddress: "IP-Adresse (NTLM)"
-        case .hostname: "Servername (Kerberos)"
+        case .automatic: tr("Automatic")
+        case .ipAddress: tr("IP address (NTLM)")
+        case .hostname: tr("Server name (Kerberos)")
         }
     }
 }
@@ -102,14 +102,14 @@ enum AuthMode: String, Codable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .password: "Benutzer und Passwort (erzwingen)"
-        case .kerberos: "Domänen-Login des Macs (Kerberos)"
+        case .password: tr("User & Password")
+        case .kerberos: tr("Domain Login")
         }
     }
 }
 
 /// A server profile: one server + one login. Its shares are mounted as subfolders of
-/// ~/Netzlaufwerke/<name>, which is a plain folder and keeps the profile's name in Finder.
+/// the mount root (e.g. ~/Network Drives/<name>), which is a plain folder and keeps the profile's name in Finder.
 struct Connection: Codable, Identifiable, Hashable {
     var id = UUID()
     var name: String
@@ -191,14 +191,14 @@ struct Connection: Codable, Identifiable, Hashable {
     var needsPassword: Bool { kind != .smb || authMode == .password }
 
     static func blank() -> Connection {
-        Connection(name: "Neuer Server", host: "", shares: [], username: "")
+        Connection(name: tr("New Server"), host: "", shares: [], username: "")
     }
 
     /// Copy with a new identity, e.g. to add a second user on the same server.
     func duplicate() -> Connection {
         var copy = self
         copy.id = UUID()
-        copy.name = "\(name) Kopie"
+        copy.name = tr("%@ Copy", name)
         return copy
     }
 
@@ -211,7 +211,7 @@ struct Connection: Codable, Identifiable, Hashable {
     }
 
     var displayUser: String {
-        if !needsPassword { return "Domänen-Login" }
+        if !needsPassword { return tr("Domain Login") }
         return domain.isEmpty ? username : "\(domain)\\\(username)"
     }
 
@@ -248,14 +248,14 @@ enum ConnectionStatus: Equatable {
 
     var label: String {
         switch self {
-        case .disconnected: "Nicht verbunden"
-        case .paused: "Getrennt (manuell)"
-        case .connecting: "Verbinde …"
-        case .connected: "Verbunden"
-        case .partial(let mounted, let total, let detail): "\(mounted) von \(total) Freigaben verbunden – \(detail)"
-        case .unreachable: "Server nicht erreichbar – versuche es weiter"
-        case .needsPassword: "Kein Passwort hinterlegt"
-        case .authFailed: "Anmeldung fehlgeschlagen – bitte Zugangsdaten prüfen"
+        case .disconnected: tr("Not connected")
+        case .paused: tr("Disconnected (manually)")
+        case .connecting: tr("Connecting …")
+        case .connected: tr("Connected")
+        case .partial(let mounted, let total, let detail): tr("%lld of %lld shares connected – %@", mounted, total, detail)
+        case .unreachable: tr("Server not reachable – still trying")
+        case .needsPassword: tr("No password saved")
+        case .authFailed: tr("Login failed – please check the credentials")
         case .error(let message): message
         }
     }

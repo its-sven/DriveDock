@@ -34,7 +34,7 @@ struct SettingsView: View {
                     if let draft = state.draft {
                         HStack(spacing: 10) {
                             IconTile(symbol: "plus", color: draft.color.color, size: 26)
-                            Text(draft.name.isEmpty ? "Neuer Server" : draft.name)
+                            Text(draft.name.isEmpty ? tr("New Server") : draft.name)
                         }
                         .tag(SidebarItem.new(draft.id))
                     }
@@ -42,7 +42,7 @@ struct SettingsView: View {
                 Section {
                     HStack(spacing: 10) {
                         IconTile(symbol: "gearshape.fill", color: .gray, size: 26)
-                        Text("Allgemein")
+                        Text("General")
                     }
                     .tag(SidebarItem.general)
                 }
@@ -53,9 +53,9 @@ struct SettingsView: View {
                     Button {
                         addServer()
                     } label: {
-                        Label("Server hinzufügen", systemImage: "plus")
+                        Label("Add Server", systemImage: "plus")
                     }
-                    .help("Server hinzufügen")
+                    .help("Add Server")
                 }
             }
         } detail: {
@@ -74,10 +74,10 @@ struct SettingsView: View {
             }
         }
         .confirmationDialog(
-            "„\(state.confirmDelete?.name ?? "")“ entfernen?",
+            tr("Remove “%@”?", state.confirmDelete?.name ?? ""),
             isPresented: Binding(get: { state.confirmDelete != nil }, set: { if !$0 { state.confirmDelete = nil } })
         ) {
-            Button("Entfernen", role: .destructive) {
+            Button("Remove", role: .destructive) {
                 if let c = state.confirmDelete {
                     manager.delete(c)
                     state.selection = manager.connections.first { $0.id != c.id }.map { .server($0.id) } ?? .general
@@ -85,7 +85,7 @@ struct SettingsView: View {
                 state.confirmDelete = nil
             }
         } message: {
-            Text("Alle Freigaben werden getrennt, der Eintrag in der Finder-Seitenleiste entfernt und das Passwort aus dem Schlüsselbund gelöscht.")
+            Text("All shares are disconnected, the Finder sidebar entry is removed and the password is deleted from the keychain.")
         }
     }
 
@@ -126,20 +126,20 @@ struct SettingsView: View {
 
     private var placeholder: some View {
         ContentUnavailableView(
-            "Kein Server ausgewählt",
+            "No Server Selected",
             systemImage: "server.rack",
-            description: Text("Wähle links einen Server oder lege mit + einen neuen an. Für jeden Benutzer legst du einen eigenen Server an.")
+            description: Text("Select a server on the left or add one with +. Add a separate server for each user.")
         )
     }
 
     @ViewBuilder
     private func contextMenu(for c: Connection) -> some View {
-        Button("Verbinden") { manager.connect(c) }
-        Button("Trennen") { manager.disconnect(c) }
-        Button("Im Finder öffnen") { manager.openInFinder(c) }
+        Button("Connect") { manager.connect(c) }
+        Button("Disconnect") { manager.disconnect(c) }
+        Button("Open in Finder") { manager.openInFinder(c) }
         Divider()
-        Button("Duplizieren") { duplicate(c) }
-        Button("Entfernen …", role: .destructive) { state.confirmDelete = c }
+        Button("Duplicate") { duplicate(c) }
+        Button("Remove …", role: .destructive) { state.confirmDelete = c }
     }
 
     private func addServer() {
@@ -265,21 +265,21 @@ struct ServerEditor: View {
             behaviourSection
             if !isNew {
                 Section {
-                    Button("Server entfernen …", role: .destructive, action: onDelete)
+                    Button("Remove Server …", role: .destructive, action: onDelete)
                         .frame(maxWidth: .infinity)
                 }
             }
         }
         .formStyle(.grouped)
-        .navigationTitle(s.draft.name.isEmpty ? "Neuer Server" : s.draft.name)
+        .navigationTitle(s.draft.name.isEmpty ? tr("New Server") : s.draft.name)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if isNew {
-                    Button("Abbrechen", action: onDelete)
+                    Button("Cancel", action: onDelete)
                 } else if isDirty {
-                    Button("Verwerfen", action: reset)
+                    Button("Revert", action: reset)
                 }
-                Button(isNew ? "Hinzufügen" : "Sichern", action: save)
+                Button(isNew ? tr("Add") : tr("Save"), action: save)
                     .buttonStyle(.glassProminent)
                     .disabled(!isValid || !isDirty)
                     .keyboardShortcut("s", modifiers: .command)
@@ -299,10 +299,10 @@ struct ServerEditor: View {
             HStack(spacing: 14) {
                 ServerTile(status: isNew ? .disconnected : status, color: s.draft.color.color, size: 54)
                 VStack(alignment: .leading, spacing: 4) {
-                    TextField("Name", text: $s.draft.name, prompt: Text("Name, z. B. Fileserver (Admin)"))
+                    TextField("Name", text: $s.draft.name, prompt: Text("Name, e.g. Fileserver (Admin)"))
                         .textFieldStyle(.plain)
                         .font(.title2.weight(.semibold))
-                    Text(isNew ? "Neuer Server – noch nicht gesichert" : status.label)
+                    Text(isNew ? tr("New server – not saved yet") : status.label)
                         .font(.callout)
                         .foregroundStyle(status.isProblem && !isNew ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                         .lineLimit(2)
@@ -318,10 +318,10 @@ struct ServerEditor: View {
                         .buttonStyle(.glass)
                         .buttonBorderShape(.circle)
                         .controlSize(.large)
-                        .help("Server duplizieren – z. B. für einen weiteren Benutzer")
+                        .help("Duplicate server – e.g. for another user")
                     }
                     let connected = manager.isKeptConnected(original)
-                    Button(connected ? "Trennen" : "Verbinden") {
+                    Button(connected ? tr("Disconnect") : tr("Connect")) {
                         connected ? manager.disconnect(original) : manager.connect(original)
                     }
                     .buttonStyle(.glass)
@@ -334,36 +334,36 @@ struct ServerEditor: View {
 
     private var connectionSection: some View {
         Section {
-            Picker("Protokoll", selection: $s.draft.kind) {
+            Picker("Protocol", selection: $s.draft.kind) {
                 ForEach(ServiceKind.allCases) { Text($0.label).tag($0) }
             }
-            TextField("Server", text: $s.draft.host, prompt: Text("fileserver.firma.local oder 192.168.1.10"))
-            TextField("Weitere Adressen", text: $s.alternateHosts, prompt: Text("optional, z. B. Adresse über VPN"))
-            TextField("Port", text: $s.portText, prompt: Text("Standard (\(s.draft.kind.defaultPort))"))
+            TextField("Server", text: $s.draft.host, prompt: Text("fileserver.example.com or 192.168.1.10"))
+            TextField("Other Addresses", text: $s.alternateHosts, prompt: Text("optional, e.g. the address over VPN"))
+            TextField("Port", text: $s.portText, prompt: Text(tr("Default (%lld)", s.draft.kind.defaultPort)))
             if s.draft.kind == .smb, s.draft.authMode == .password {
                 Picker(selection: $s.draft.addressMode) {
                     ForEach(AddressMode.allCases) { Text($0.label).tag($0) }
                 } label: {
-                    Text("Verbinden über")
+                    Text("Connect via")
                     Text(s.draft.connectsByIP
-                         ? "Über die IP-Adresse – dein Mac-Login kann die Anmeldung nicht übernehmen."
-                         : "Über den Servernamen – nötig, wenn die Domäne wie „firma.local“ aussieht.")
+                         ? tr("By IP address – your Mac's own login can't take over.")
+                         : tr("By server name – needed when the domain looks like “corp.example.com”."))
                 }
             }
-            LabeledContent("Erreichbarkeit") {
+            LabeledContent("Reachability") {
                 HStack(spacing: 8) {
                     if s.checking { ProgressView().controlSize(.small) }
                     if let result = s.reachability {
                         Text(result).foregroundStyle(.secondary)
                     }
-                    Button("Prüfen", action: checkReachability)
+                    Button("Check", action: checkReachability)
                         .disabled(edited.allHosts.isEmpty || s.checking)
                 }
             }
         } header: {
-            Text("Verbindung")
+            Text("Connection")
         } footer: {
-            Text("Adressen werden der Reihe nach probiert – so klappt es im Büro und über VPN.")
+            Text("Addresses are tried in order – so it works in the office and over VPN.")
                 .foregroundStyle(.secondary)
         }
     }
@@ -371,26 +371,25 @@ struct ServerEditor: View {
     private var loginSection: some View {
         Section {
             if s.draft.kind == .smb {
-                Picker("Anmeldung", selection: $s.draft.authMode) {
-                    Text("Benutzer & Passwort").tag(AuthMode.password)
-                    Text("Domänen-Login").tag(AuthMode.kerberos)
+                Picker("Login", selection: $s.draft.authMode) {
+                    ForEach(AuthMode.allCases) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
             }
             if s.draft.needsPassword {
                 if s.draft.kind == .smb {
-                    TextField("Domäne", text: $s.draft.domain, prompt: Text("optional, z. B. FIRMA"))
+                    TextField("Domain", text: $s.draft.domain, prompt: Text("optional, e.g. CORP"))
                 }
-                TextField("Benutzer", text: $s.draft.username, prompt: Text("Benutzername"))
-                SecureField("Passwort", text: $s.password,
-                            prompt: Text(hasStoredPassword ? "Gesichert – leer lassen für unverändert" : "Passwort"))
+                TextField("User", text: $s.draft.username, prompt: Text("User name"))
+                SecureField("Password", text: $s.password,
+                            prompt: Text(hasStoredPassword ? tr("Saved – leave empty to keep it") : tr("Password")))
             }
         } header: {
-            Text("Anmeldung")
+            Text("Login")
         } footer: {
             Text(s.draft.needsPassword
-                 ? "Meldet sich immer mit diesem Benutzer an – auch wenn der Mac per Domäne angemeldet ist. Das Passwort liegt im Schlüsselbund."
-                 : "Nutzt das Kerberos-Ticket deiner Mac-Anmeldung. Es wird kein Passwort gespeichert.")
+                 ? tr("Always logs in as this user – even when the Mac is logged in to a domain. The password is kept in the keychain.")
+                 : tr("Uses the Kerberos ticket of your Mac login. No password is stored."))
                 .foregroundStyle(.secondary)
         }
     }
@@ -453,41 +452,41 @@ struct ServerEditor: View {
         Section {
             if s.draft.kind == .smb {
                 Toggle(isOn: $s.draft.mountAllShares) {
-                    Text("Alle Freigaben verbinden")
-                    Text("Wie unter Windows: alles, was der Server diesem Benutzer anbietet. Neue Freigaben kommen automatisch dazu, einzelne kannst du unten abwählen.")
+                    Text("Connect All Shares")
+                    Text("Like on Windows: everything the server offers to this user. New shares are added automatically; you can deselect single ones below.")
                 }
                 if s.available.contains(where: \.isHidden) || s.draft.includeHiddenShares {
                     Toggle(isOn: $s.draft.includeHiddenShares) {
-                        Text("Administrative Freigaben")
-                        Text("C$, ADMIN$, Personal$ … – nur für Admin-Benutzer sinnvoll")
+                        Text("Administrative Shares")
+                        Text("C$, ADMIN$, Personal$ … – only useful for admin users")
                     }
                 }
             }
 
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Freigaben durchsuchen", text: $s.search)
+                TextField("Search shares", text: $s.search)
                     .textFieldStyle(.plain)
                 if s.loadingShares {
                     ProgressView().controlSize(.small)
                 }
                 Menu {
-                    Button("Alle auswählen") { selectAll(true) }
-                    Button("Keine auswählen") { selectAll(false) }
+                    Button("Select All") { selectAll(true) }
+                    Button("Select None") { selectAll(false) }
                 } label: {
                     Image(systemName: "checklist")
                 }
                 .menuStyle(.button)
                 .buttonStyle(.borderless)
                 .fixedSize()
-                .help("Auswahl")
+                .help("Selection")
                 if s.draft.kind == .smb {
                     Button(action: loadShares) {
                         Image(systemName: "arrow.clockwise")
                     }
                     .buttonStyle(.borderless)
                     .disabled(!canLoadShares || s.loadingShares)
-                    .help("Freigaben vom Server laden")
+                    .help("Load shares from the server")
                 }
             }
 
@@ -499,8 +498,8 @@ struct ServerEditor: View {
             let rows = visibleShares
             if rows.isEmpty, !s.loadingShares {
                 Text(s.draft.kind == .smb
-                     ? (canLoadShares ? "Noch keine Freigaben geladen – tippe auf ↻." : "Gib Server und Anmeldung ein, dann lade die Freigaben mit ↻.")
-                     : "Füge unten den WebDAV-Pfad hinzu.")
+                     ? (canLoadShares ? tr("No shares loaded yet – click ↻.") : tr("Enter server and login, then load the shares with ↻."))
+                     : tr("Add the WebDAV path below."))
                     .foregroundStyle(.secondary)
             }
             ForEach(rows, id: \.self) { share in
@@ -515,9 +514,9 @@ struct ServerEditor: View {
 
             if !s.draft.mountsAll {
                 HStack {
-                    TextField("Pfad hinzufügen", text: $s.newShare,
-                              prompt: Text(s.draft.kind == .smb ? "z. B. Daten/Projekte" : "z. B. remote.php/dav/files/benutzer"))
-                    Button("Hinzufügen") {
+                    TextField("Add path", text: $s.newShare,
+                              prompt: Text(s.draft.kind == .smb ? tr("e.g. Data/Projects") : tr("e.g. remote.php/dav/files/user")))
+                    Button("Add") {
                         let share = Connection.normalizedShare(s.newShare)
                         if !share.isEmpty, !s.draft.shares.contains(share) { s.draft.shares.append(share) }
                         s.newShare = ""
@@ -527,26 +526,26 @@ struct ServerEditor: View {
             }
         } header: {
             HStack {
-                Text("Freigaben")
+                Text("Shares")
                 Spacer()
                 if selectedCount > 0 {
-                    Text("\(selectedCount) ausgewählt").foregroundStyle(.secondary)
+                    Text(tr("%lld selected", selectedCount)).foregroundStyle(.secondary)
                 }
             }
         } footer: {
-            Text("Die Freigaben erscheinen im Finder im Ordner „\(s.draft.name.isEmpty ? "…" : s.draft.name)“, der einen eigenen Eintrag in der Seitenleiste hat.")
+            Text(tr("The shares appear in Finder in the folder “%@”, which has its own entry in the sidebar.", s.draft.name.isEmpty ? "…" : s.draft.name))
                 .foregroundStyle(.secondary)
         }
     }
 
     private var behaviourSection: some View {
-        Section("Verhalten") {
+        Section("Behavior") {
             Toggle(isOn: $s.draft.autoConnect) {
-                Text("Automatisch verbinden")
-                Text("Beim Anmelden, nach dem Ruhezustand und bei Netzwerkwechseln")
+                Text("Connect Automatically")
+                Text("At login, after sleep and when the network changes")
             }
             if !isNew {
-                LabeledContent("Ort im Finder") {
+                LabeledContent("Location in Finder") {
                     Button {
                         manager.openInFinder(original)
                     } label: {
@@ -601,14 +600,14 @@ struct ServerEditor: View {
             defer { s.loadingShares = false }
             let password: String? = typed.isEmpty ? await Task.detached { Keychain.password(for: id) }.value : typed
             guard let host = await Reachability.firstReachable(hosts: c.allHosts, port: c.effectivePort) else {
-                s.sharesError = "Server nicht erreichbar"
+                s.sharesError = tr("Server not reachable")
                 return
             }
             do {
                 s.available = try await Task.detached {
                     try ShareBrowser.list(c, host: host, password: password)
                 }.value
-                if s.available.isEmpty { s.sharesError = "Der Server bietet keine Freigaben an" }
+                if s.available.isEmpty { s.sharesError = tr("The server offers no shares") }
             } catch {
                 s.sharesError = error.localizedDescription
             }
@@ -637,11 +636,11 @@ private struct ShareRow: View {
                 }
                 Spacer()
                 if denied {
-                    Label("Kein Zugriff", systemImage: "lock.fill")
+                    Label("No access", systemImage: "lock.fill")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else if mounted {
-                    Text("Verbunden")
+                    Text("Connected")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.green)
                 }
@@ -661,6 +660,10 @@ private final class GeneralState: ObservableObject {
 private struct GeneralSettingsView: View {
     @StateObject private var state = GeneralState()
 
+    private var rootFolderDisplayPath: String {
+        ConnectionManager.mountRoot.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+    }
+
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "–"
     }
@@ -672,16 +675,16 @@ private struct GeneralSettingsView: View {
                     IconTile(symbol: "externaldrive.connected.to.line.below.fill", color: .blue, size: 54)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("DriveDock").font(.title2.weight(.semibold))
-                        Text("Version \(version)").foregroundStyle(.secondary)
+                        Text(tr("Version %@", version)).foregroundStyle(.secondary)
                     }
                 }
                 .padding(.vertical, 6)
             }
 
-            Section("Start") {
+            Section("Startup") {
                 Toggle(isOn: $state.launchAtLogin) {
-                    Text("Bei Anmeldung starten")
-                    Text("Damit deine Laufwerke nach dem Hochfahren sofort da sind")
+                    Text("Launch at Login")
+                    Text("So your drives are there right after startup")
                 }
                 .onChange(of: state.launchAtLogin) { _, enabled in
                     do {
@@ -698,20 +701,20 @@ private struct GeneralSettingsView: View {
             }
 
             Section("Finder") {
-                LabeledContent("Ordner") {
+                LabeledContent("Folder") {
                     Button {
                         NSWorkspace.shared.open(ConnectionManager.mountRoot)
                     } label: {
-                        Label("~/Netzlaufwerke", systemImage: "folder")
+                        Label(rootFolderDisplayPath, systemImage: "folder")
                     }
                     .buttonStyle(.link)
                 }
-                LabeledContent("Seitenleiste") {
+                LabeledContent("Sidebar") {
                     if state.inSidebar {
-                        Label("Eingetragen", systemImage: "checkmark.circle.fill")
+                        Label("Added", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                     } else {
-                        Button("Hinzufügen") {
+                        Button("Add") {
                             FinderSidebar.add(ConnectionManager.mountRoot)
                             state.inSidebar = FinderSidebar.contains(ConnectionManager.mountRoot)
                         }
@@ -720,6 +723,28 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("Allgemein")
+        .navigationTitle("General")
+        .safeAreaInset(edge: .bottom) { CreditFooter() }
+    }
+}
+
+/// Small credit line at the bottom of the General page.
+private struct CreditFooter: View {
+    var body: some View {
+        VStack(spacing: 3) {
+            Text("Made by Sven Würth · Open source under the MIT License")
+            Link(destination: AppInfo.repositoryURL) {
+                Label {
+                    Text(verbatim: "github.com/its-sven/DriveDock")
+                } icon: {
+                    Image(systemName: "arrow.up.right.square")
+                }
+            }
+            .help("Open the project on GitHub")
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
     }
 }

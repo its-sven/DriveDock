@@ -38,6 +38,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# Translations: English is the development language, the others are *.lproj folders.
+cp -R Resources/*.lproj "$APP/Contents/Resources/"
 
 VERSION="${VERSION:-$($PLIST_BUDDY -c 'Print :CFBundleShortVersionString' Resources/Info.plist)}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}"

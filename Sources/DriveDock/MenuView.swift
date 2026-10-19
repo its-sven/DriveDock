@@ -32,8 +32,8 @@ struct MenuView: View {
     private var summary: String {
         let servers = manager.connections.count
         let shares = manager.mountedShareCount
-        let serverText = servers == 1 ? "1 Server" : "\(servers) Server"
-        let shareText = shares == 1 ? "1 Freigabe verbunden" : "\(shares) Freigaben verbunden"
+        let serverText = servers == 1 ? tr("1 server") : tr("%lld servers", servers)
+        let shareText = shares == 1 ? tr("1 share connected") : tr("%lld shares connected", shares)
         return "\(serverText) · \(shareText)"
     }
 
@@ -52,7 +52,7 @@ struct MenuView: View {
             }
             .buttonStyle(.glass)
             .buttonBorderShape(.circle)
-            .help("Alle jetzt verbinden")
+            .help("Connect all now")
         }
     }
 
@@ -61,12 +61,12 @@ struct MenuView: View {
             Image(systemName: "server.rack")
                 .font(.system(size: 34, weight: .light))
                 .foregroundStyle(.secondary)
-            Text("Noch keine Server").font(.headline)
-            Text("Lege einen Server mit Benutzer an – die Freigaben erscheinen dann im Finder.")
+            Text("No servers yet").font(.headline)
+            Text("Add a server with a user – its shares will then appear in Finder.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            Button("Server hinzufügen") { openManager() }
+            Button("Add Server") { openManager() }
                 .buttonStyle(.glassProminent)
                 .controlSize(.large)
         }
@@ -79,14 +79,14 @@ struct MenuView: View {
             Button {
                 openManager()
             } label: {
-                Label("Server verwalten …", systemImage: "slider.horizontal.3")
+                Label("Manage Servers …", systemImage: "slider.horizontal.3")
             }
             .buttonStyle(.glass)
 
             Button {
                 NSWorkspace.shared.open(ConnectionManager.mountRoot)
             } label: {
-                Label("Netzlaufwerke", systemImage: "folder")
+                Label(ConnectionManager.mountRoot.lastPathComponent, systemImage: "folder")
             }
             .buttonStyle(.glass)
 
@@ -99,7 +99,7 @@ struct MenuView: View {
             }
             .buttonStyle(.glass)
             .buttonBorderShape(.circle)
-            .help("DriveDock beenden")
+            .help("Quit DriveDock")
         }
     }
 
@@ -145,16 +145,16 @@ private struct ServerCard: View {
                 .buttonStyle(.glass)
                 .buttonBorderShape(.circle)
                 .controlSize(.small)
-                .help("Im Finder öffnen")
+                .help("Open in Finder")
 
-                Toggle("Verbunden", isOn: Binding(
+                Toggle("Connected", isOn: Binding(
                     get: { manager.isKeptConnected(connection) },
                     set: { on in on ? manager.connect(connection) : manager.disconnect(connection) }
                 ))
                 .toggleStyle(.switch)
                 .controlSize(.small)
                 .labelsHidden()
-                .help("Verbunden halten")
+                .help("Keep connected")
             }
 
             if !all.isEmpty {
@@ -169,19 +169,19 @@ private struct ServerCard: View {
                         }
                     }
                     if shares.count > Self.maxChips {
-                        Text("+\(shares.count - Self.maxChips)")
+                        Text(verbatim: "+\(shares.count - Self.maxChips)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 3)
                     }
                     if deniedCount > 0 {
-                        Label("\(deniedCount) ohne Zugriff", systemImage: "lock.fill")
+                        Label(tr("%lld without access", deniedCount), systemImage: "lock.fill")
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 3)
-                            .help("Diese Freigaben listet der Server, der Benutzer darf sie aber nicht öffnen.")
+                            .help("The server lists these shares, but this user may not open them.")
                     }
                 }
             }

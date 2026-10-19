@@ -13,18 +13,18 @@ struct MountError: LocalizedError {
 
     var errorDescription: String? {
         switch code {
-        case EACCES, EPERM: "Zugriff verweigert"
-        case EAUTH, -5045, -5023: "Anmeldung fehlgeschlagen"
-        case ENOENT: "Freigabe nicht gefunden"
-        case EEXIST: "Bereits anderweitig verbunden"
-        case ETIMEDOUT: "Server antwortet nicht (Zeitüberschreitung)"
-        case ECONNREFUSED: "Verbindung abgelehnt"
-        case EHOSTUNREACH, ENETUNREACH: "Server nicht erreichbar"
-        case -6003: "Abgebrochen"
+        case EACCES, EPERM: tr("Access denied")
+        case EAUTH, -5045, -5023: tr("Login failed")
+        case ENOENT: tr("Share not found")
+        case EEXIST: tr("Already connected elsewhere")
+        case ETIMEDOUT: tr("Server not responding (timeout)")
+        case ECONNREFUSED: tr("Connection refused")
+        case EHOSTUNREACH, ENETUNREACH: tr("Server not reachable")
+        case -6003: tr("Cancelled")
         default:
             detail ?? (code > 0
-                ? "Fehler \(code): \(String(cString: strerror(code)))"
-                : "Fehler \(code)")
+                ? tr("Error %lld: %@", Int(code), String(cString: strerror(code)))
+                : tr("Error %lld", Int(code)))
         }
     }
 }
@@ -178,7 +178,7 @@ enum Mounter {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .last { !$0.isEmpty }?
             .replacingOccurrences(of: "mount_smbfs: ", with: "")
-        return MountError(code: EIO, detail: line ?? "mount_smbfs-Fehler \(result.status)")
+        return MountError(code: EIO, detail: line ?? tr("mount_smbfs error %lld", Int(result.status)))
     }
 
     static func resolveIPv4(_ host: String) -> String? {

@@ -39,3 +39,7 @@ struct DriveDockApp: App {
 enum WindowID {
     static let connections = "connections"
 }
+
+enum AppInfo {
+    static let repositoryURL = URL(string: "https://github.com/its-sven/DriveDock")!
+}

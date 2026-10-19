@@ -6,8 +6,27 @@ import Network
 /// wake, network changes (Wi-Fi/VPN) and unmounts.
 @MainActor
 final class ConnectionManager: ObservableObject {
-    nonisolated static let mountRoot = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Netzlaufwerke", isDirectory: true)
+    /// Folder that holds one subfolder per server profile. Its name follows the system
+    /// language on first launch ("Network Drives", German "Netzlaufwerke") and is then kept,
+    /// so mounts and Finder favorites don't move when the language changes.
+    nonisolated static let mountRoot: URL = {
+        let key = "mountRootName"
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let defaults = UserDefaults.standard
+        if let name = defaults.string(forKey: key) {
+            return home.appendingPathComponent(name, isDirectory: true)
+        }
+        // Installations before 0.5 always used the German name.
+        let legacy = "Netzlaufwerke"
+        let name: String
+        if FileManager.default.fileExists(atPath: home.appendingPathComponent(legacy).path) {
+            name = legacy
+        } else {
+            name = Bundle.main.preferredLocalizations.first == "de" ? legacy : "Network Drives"
+        }
+        defaults.set(name, forKey: key)
+        return home.appendingPathComponent(name, isDirectory: true)
+    }()
 
     private static let retryInterval: TimeInterval = 20
     /// How often "all shares" profiles look for shares that were added or removed on the server.
@@ -104,12 +123,12 @@ final class ConnectionManager: ObservableObject {
                 continue
             }
             if c.mountsAll, fresh, wanted.isEmpty {
-                status[c.id] = .error("Keine zugänglichen Freigaben gefunden")
+                status[c.id] = .error(tr("No accessible shares found"))
                 continue
             }
             guard c.autoConnect else {
                 if mountedCount > 0 {
-                    status[c.id] = .partial(mounted: mountedCount, total: wanted.count, detail: "Rest nicht verbunden")
+                    status[c.id] = .partial(mounted: mountedCount, total: wanted.count, detail: tr("the rest is not connected"))
                 } else if case .error = status(of: c) {
                     // keep the last error visible
                 } else {
@@ -174,7 +193,7 @@ final class ConnectionManager: ObservableObject {
 
     // MARK: - Paths
 
-    /// The profile's folder, e.g. ~/Netzlaufwerke/Fileserver (Admin). A plain folder, so Finder
+    /// The profile's folder, e.g. ~/Network Drives/Fileserver (Admin). A plain folder, so Finder
     /// shows the profile name; the shares inside are mount points.
     func profileFolder(for c: Connection) -> URL {
         Self.mountRoot.appendingPathComponent(c.mountFolderName, isDirectory: true).standardizedFileURL
@@ -182,7 +201,7 @@ final class ConnectionManager: ObservableObject {
 
     func mountPoint(for c: Connection, share: String) -> URL {
         let name = Connection.folderName(Connection.normalizedShare(share))
-        return profileFolder(for: c).appendingPathComponent(name.isEmpty ? "Freigabe" : name, isDirectory: true)
+        return profileFolder(for: c).appendingPathComponent(name.isEmpty ? "Share" : name, isDirectory: true)
     }
 
     private func prepareFinderEntry(_ c: Connection) {
@@ -231,7 +250,7 @@ final class ConnectionManager: ObservableObject {
         // Never create share folders while something is mounted on the profile folder
         // itself (old layout or a manual mount): they would end up on that server.
         if MountTable.isMounted(profileFolder(for: c)) {
-            status[c.id] = .error("Ordner „\(c.mountFolderName)“ ist selbst ein Netzlaufwerk – bitte trennen")
+            status[c.id] = .error(tr("The folder “%@” is itself a network drive – please disconnect it", c.mountFolderName))
             migrateLegacyMounts { [weak self] in self?.reconcile(after: 1) }
             return
         }
@@ -274,7 +293,7 @@ final class ConnectionManager: ObservableObject {
                     return
                 } catch {
                     if c.mountsAll, discovered[c.id] == nil {
-                        status[c.id] = .error("Freigaben konnten nicht geladen werden: \(error.localizedDescription)")
+                        status[c.id] = .error(tr("Could not load the shares: %@", error.localizedDescription))
                         return
                     }
                 }
@@ -282,7 +301,7 @@ final class ConnectionManager: ObservableObject {
 
             let wanted = targets(of: c)
             if wanted.isEmpty {
-                status[c.id] = c.mountsAll ? .error("Keine zugänglichen Freigaben gefunden") : .disconnected
+                status[c.id] = c.mountsAll ? .error(tr("No accessible shares found")) : .disconnected
                 return
             }
             let todo = wanted
@@ -322,7 +341,7 @@ final class ConnectionManager: ObservableObject {
 
             for result in results {
                 if let error = result.error as? MountError {
-                    ActivityLog.write("  \(c.name) / \(result.share): Fehler \(error.code) – \(error.localizedDescription)")
+                    ActivityLog.write("  \(c.name) / \(result.share): error \(error.code) – \(error.localizedDescription)")
                 } else if let error = result.error {
                     ActivityLog.write("  \(c.name) / \(result.share): \(error.localizedDescription)")
                 }
@@ -332,14 +351,14 @@ final class ConnectionManager: ObservableObject {
             if total == 0, !results.isEmpty {
                 let names = (denied[c.id] ?? []).sorted().joined(separator: ", ")
                 status[c.id] = .error(failures.isEmpty
-                    ? "Kein Zugriff auf \(names) – Anmeldung ok, aber der Server verweigert die Freigaben"
+                    ? tr("No access to %@ – the login works, but the server refuses these shares", names)
                     : failures.joined(separator: "; "))
             } else if mountedNow.count == total {
                 status[c.id] = .connected
             } else if !mountedNow.isEmpty {
                 status[c.id] = .partial(mounted: mountedNow.count, total: total, detail: failures.joined(separator: "; "))
             } else {
-                status[c.id] = .error(failures.isEmpty ? "Keine Freigabe verbunden" : failures.joined(separator: "; "))
+                status[c.id] = .error(failures.isEmpty ? tr("No share connected") : failures.joined(separator: "; "))
             }
         }
     }
@@ -376,7 +395,7 @@ final class ConnectionManager: ObservableObject {
         let mounted = mountsInside(c, mounted: MountTable.mountPoints())
         unmountAll(mounted) { errors in
             if let error = errors.first {
-                self.status[c.id] = .error("Trennen fehlgeschlagen: \(error.localizedDescription)")
+                self.status[c.id] = .error(tr("Disconnecting failed: %@", error.localizedDescription))
             } else {
                 self.status[c.id] = .paused
             }

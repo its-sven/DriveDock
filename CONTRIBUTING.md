@@ -19,6 +19,18 @@ Remove server names, user names and IP addresses you don't want to share.
   way so the project keeps building with the Command Line Tools alone.
 - Match the style of the surrounding code; comments explain *why*, not *what*.
 
+## Translations
+
+English is the development language: the English text in the code is the key. Translations live in
+`Resources/<language>.lproj/Localizable.strings` (plus `InfoPlist.strings` for the system prompt).
+
+- **New UI text:** use a SwiftUI string literal (`Text("Save")`, `.help("…")`) or `tr("…")` for
+  everything else. Text with values uses a format key: `tr("%lld of %lld connected", a, b)` —
+  never `"\(value)"` inside a localized literal.
+- **New language:** copy `Resources/de.lproj` to `Resources/<code>.lproj`, translate the right-hand
+  side of each line, and add the code to `CFBundleLocalizations` in `Resources/Info.plist`.
+- Run `make check` – it lists missing or unused keys and mismatched placeholders. CI runs it too.
+
 ## Pull requests
 
 Keep them focused, describe what you tested (which server, which login mode), and add an entry

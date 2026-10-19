@@ -11,6 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check translations
+        run: scripts/check-localization.py
+
       - name: Build universal app
         run: SIGN_IDENTITY=- scripts/build-app.sh --universal
 

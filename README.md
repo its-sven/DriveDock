@@ -23,13 +23,13 @@ macOS can mount network shares, but it forgets them: after sleep, after switchin
 
 DriveDock fixes that. You set up a server once, and its shares stay in Finder, under a name you choose, ready when you are. It is a free, open-source take on the "always mounted" part of tools like Mountain Duck, built on the Mac's own SMB client.
 
-> **Note:** The user interface is currently in German. English localization is planned — contributions welcome.
+> Available in **English** and **German** – DriveDock follows your system language. More translations are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md#translations).
 
 ## Features
 
 - **Always connected.** Shares are mounted at login and reconnected automatically after sleep, network changes and VPN connects, with a quiet retry every 20 seconds. No error pop-ups.
 - **Several users per server.** Each server profile (server + login) gets its own SMB session, so `\\fileserver\Data` can be mounted as *you* and as *admin* at the same time.
-- **Clean Finder integration.** Every profile is a folder in `~/Netzlaufwerke` with its own entry in the Finder sidebar, named the way you named it; its shares appear inside.
+- **Clean Finder integration.** Every profile is a folder in `~/Network Drives` (`~/Netzlaufwerke` on German systems) with its own entry in the Finder sidebar, named the way you named it; its shares appear inside.
 - **All shares, like Windows.** Optionally mount everything a server offers to that user. New shares show up by themselves, and you can opt out of single ones. Or pick shares by hand from a searchable list loaded from the server.
 - **Knows the difference between "wrong password" and "no access".** Shares the user isn't allowed to open are marked *no access* and not retried in a loop. A wrong password stops automatic retries right away, so Active Directory accounts don't get locked.
 - **Works on domain-joined Macs.** If the Mac is logged in to Active Directory, macOS likes to use *that* Kerberos ticket instead of the credentials you entered. DriveDock makes sure the account you configured is the one that logs in, or deliberately uses the Mac's domain login if you prefer.
@@ -85,15 +85,16 @@ make install   # builds, copies to ~/Applications and launches
 | `make install` | Builds, installs to `~/Applications`, launches |
 | `make release` | Universal build plus DMG and ZIP in `dist/` |
 | `make icon` | Re-renders the app icon from `scripts/make-icon.swift` |
+| `make check` | Verifies that every UI text has a translation |
 | `make clean` | Removes build output |
 
 ## Usage
 
-1. Click the drive icon in the menu bar → **Server verwalten …** (*Manage servers*).
-2. Click **+** and enter the server (`fileserver.example.com` or an IP) and the login. For SMB, load the shares with ↻ and pick the ones you want — or switch on **Alle Freigaben verbinden** (*connect all shares*).
+1. Click the drive icon in the menu bar → **Manage Servers …**.
+2. Click **+** and enter the server (`fileserver.example.com` or an IP) and the login. For SMB, load the shares with ↻ and pick the ones you want — or switch on **Connect All Shares**.
 3. Save with **⌘S**. The shares are mounted and the profile shows up in the Finder sidebar.
 
-For a second account on the same server, use **Duplizieren** (*duplicate*) and change the user. Each profile can get its own color.
+For a second account on the same server, use **Duplicate** and change the user. Each profile can get its own color.
 
 The menu bar popover shows every profile with its status. The switch keeps a profile connected or disconnects it on purpose (it then stays disconnected until you switch it on again). Click a share chip to open it in Finder.
 
@@ -101,10 +102,10 @@ The menu bar popover shows every profile with its status. The switch keeps a pro
 
 | Mode | Use it when |
 |---|---|
-| **Benutzer & Passwort** (*user & password*) | You want a specific account, for example an admin account, or the server is not in your Mac's domain. |
-| **Domänen-Login** (*domain login*) | Your Mac is joined to Active Directory and you want to use your Mac login (Kerberos). No password is stored. |
+| **User & Password** | You want a specific account, for example an admin account, or the server is not in your Mac's domain. |
+| **Domain Login** | Your Mac is joined to Active Directory and you want to use your Mac login (Kerberos). No password is stored. |
 
-With user & password, DriveDock picks how to reach the server (**Verbinden über**, *connect via*):
+With *User & Password*, DriveDock picks how to reach the server (**Connect via**):
 
 - a short NetBIOS domain such as `CORP` → by **IP address**, so the Mac's own Kerberos ticket cannot take over the login
 - a DNS-style domain such as `corp.example.com` → by **server name**, so macOS can get a Kerberos ticket for the account you entered
@@ -133,6 +134,7 @@ Both tools only read passwords from a terminal, so they run under `expect` and r
 | `ToolRunner.swift` | Runs CLI tools with a timeout; passwords via `expect` |
 | `Keychain.swift` | Passwords in the login keychain |
 | `FinderSidebar.swift` | Finder sidebar favorites |
+| `Localization.swift` | `tr()` lookup; translations in `Resources/<language>.lproj` |
 | `MenuView.swift`, `SettingsView.swift`, `DesignKit.swift` | User interface |
 
 ## Privacy and security
@@ -144,11 +146,11 @@ Both tools only read passwords from a terminal, so they run under `expect` and r
 
 ## Troubleshooting
 
-**"Kein Zugriff" (no access) on a share.** The login works, but the server doesn't allow this account to open that share. Ask your admin or deselect the share.
+**"No access" on a share.** The login works, but the server doesn't allow this account to open that share. Ask your admin or deselect the share.
 
-**"Anmeldung fehlgeschlagen" (login failed).** Wrong user, domain or password. DriveDock stops retrying until you change the credentials or connect manually, so your account doesn't get locked.
+**"Login failed".** Wrong user, domain or password. DriveDock stops retrying until you change the credentials or connect manually, so your account doesn't get locked.
 
-**Logged in as the wrong user.** On a domain-joined Mac, set **Verbinden über** to *IP-Adresse*. Check who is logged in with `mount | grep Netzlaufwerke`; the user is shown in front of the server.
+**Logged in as the wrong user.** On a domain-joined Mac, set **Connect via** to *IP address*. Check who is logged in with `mount | grep smbfs`; the user is shown in front of the server.
 
 **macOS asks for keychain access after every update.** Builds from source: run `make signing` once. Releases: see [docs/RELEASING.md](docs/RELEASING.md).
 
@@ -158,7 +160,7 @@ Anything else: check `~/Library/Logs/DriveDock.log` and [open an issue](https://
 
 ## Roadmap
 
-- English localization
+- More languages (contributions welcome)
 - On-demand shares through a File Provider extension: shares listed in Finder like on Windows, connected only when opened, offline files
 - SFTP and other protocols macOS can't mount natively
 - Notarized releases with an Apple Developer ID

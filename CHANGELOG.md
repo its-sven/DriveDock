@@ -5,6 +5,19 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] – 2026-10-19
+
+### Added
+- English user interface. DriveDock now follows the system language (English or German);
+  more languages can be added as `Resources/<language>.lproj` (see CONTRIBUTING.md).
+- Credit line with a link to the GitHub project at the bottom of the *General* settings page.
+- `make check` / `scripts/check-localization.py`: verifies that every UI text is translated, also in CI.
+
+### Changed
+- New installations use `~/Network Drives` as the folder for the server profiles
+  (`~/Netzlaufwerke` on German systems). Existing installations keep their folder.
+- Homebrew cask uses the Homebrew 7 install-step format.
+
 ## [0.4.0] – 2026-10-16
 
 First public release.
@@ -24,5 +37,6 @@ First public release.
 - Activity log at `~/Library/Logs/DriveDock.log`.
 - Universal build (Apple Silicon and Intel), DMG and ZIP releases, Homebrew cask.
 
-[Unreleased]: https://github.com/its-sven/DriveDock/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/its-sven/DriveDock/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/its-sven/DriveDock/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/its-sven/DriveDock/releases/tag/v0.4.0

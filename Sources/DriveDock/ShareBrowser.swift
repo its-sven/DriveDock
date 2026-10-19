@@ -27,16 +27,16 @@ enum ShareBrowser {
             result = ToolRunner.run("/usr/bin/smbutil", ["view", "-N", "//\(host)"], timeout: 25)
         }
         if result.timedOut {
-            throw BrowseError(message: "Server antwortet nicht (Zeitüberschreitung)")
+            throw BrowseError(message: tr("Server not responding (timeout)"))
         }
         if result.passwordRejected || result.output.lowercased().contains("authentication error") {
-            throw BrowseError(message: "Anmeldung fehlgeschlagen – Benutzer/Passwort prüfen", isAuthFailure: true)
+            throw BrowseError(message: tr("Login failed – check user and password"), isAuthFailure: true)
         }
         guard result.status == 0 else {
             let message = result.output
                 .components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespaces) }
-                .last { !$0.isEmpty } ?? "smbutil-Fehler \(result.status)"
+                .last { !$0.isEmpty } ?? tr("smbutil error %lld", Int(result.status))
             throw BrowseError(message: message.replacingOccurrences(of: "smbutil: ", with: ""))
         }
         return parse(result.output)
