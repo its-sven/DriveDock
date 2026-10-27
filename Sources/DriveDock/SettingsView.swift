@@ -191,9 +191,12 @@ private final class EditorState: ObservableObject {
     @Published var sharesError: String?
     @Published var search = ""
     @Published var newShare = ""
+    /// Read once when the editor opens – the view struct itself is re-created on every render.
+    let hasStoredPassword: Bool
 
     init(_ c: Connection) {
         draft = c
+        hasStoredPassword = Keychain.hasPassword(for: c.id)
         alternateHosts = c.alternateHosts.joined(separator: ", ")
         portText = c.port.map(String.init) ?? ""
     }
@@ -208,7 +211,7 @@ struct ServerEditor: View {
     var onDuplicate: (() -> Void)?
 
     @StateObject private var s: EditorState
-    private let hasStoredPassword: Bool
+    private var hasStoredPassword: Bool { s.hasStoredPassword }
 
     init(original: Connection, isNew: Bool, initialPassword: String = "",
          onSaved: @escaping (UUID) -> Void, onDelete: @escaping () -> Void, onDuplicate: (() -> Void)? = nil) {
@@ -220,7 +223,6 @@ struct ServerEditor: View {
         let state = EditorState(original)
         state.password = initialPassword
         _s = StateObject(wrappedValue: state)
-        hasStoredPassword = Keychain.hasPassword(for: original.id)
     }
 
     // MARK: Derived state
@@ -598,15 +600,13 @@ struct ServerEditor: View {
         s.sharesError = nil
         Task {
             defer { s.loadingShares = false }
-            let password: String? = typed.isEmpty ? await Task.detached { Keychain.password(for: id) }.value : typed
+            let password: String? = typed.isEmpty ? await Blocking.run { Keychain.password(for: id) } : typed
             guard let host = await Reachability.firstReachable(hosts: c.allHosts, port: c.effectivePort) else {
                 s.sharesError = tr("Server not reachable")
                 return
             }
             do {
-                s.available = try await Task.detached {
-                    try ShareBrowser.list(c, host: host, password: password)
-                }.value
+                s.available = try await Blocking.run { try ShareBrowser.list(c, host: host, password: password) }
                 if s.available.isEmpty { s.sharesError = tr("The server offers no shares") }
             } catch {
                 s.sharesError = error.localizedDescription

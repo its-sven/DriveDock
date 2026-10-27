@@ -23,12 +23,15 @@ enum ActivityLog {
                 try? fm.moveItem(at: url, to: url.appendingPathExtension("old"))
             }
             guard let data = line.data(using: .utf8) else { return }
-            if let handle = try? FileHandle(forWritingTo: url) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                try? handle.close()
-            } else {
-                try? data.write(to: url)
+            // The throwing FileHandle API: the old seekToEndOfFile()/write(_:) raise an
+            // Objective-C exception on I/O errors (e.g. a full disk) and crash the app.
+            do {
+                let handle = try FileHandle(forWritingTo: url)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } catch {
+                try? data.write(to: url, options: .atomic)
             }
         }
     }

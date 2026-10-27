@@ -35,18 +35,14 @@ final class ConnectionManager: ObservableObject {
     private static let parallelMounts = 4
 
     @Published private(set) var connections: [Connection] = []
-    @Published private(set) var status: [UUID: ConnectionStatus] = [:] {
-        didSet {
-            for (id, new) in status where oldValue[id] != new {
-                let name = connections.first { $0.id == id }?.name ?? id.uuidString
-                ActivityLog.write("\(name): \(new.label)")
-            }
-        }
-    }
+    @Published private(set) var status: [UUID: ConnectionStatus] = [:]
     /// Shares the server offered at the last discovery.
     @Published private(set) var discovered: [UUID: [ShareBrowser.Share]] = [:]
     /// Shares the login may see but not open (Windows lists those too); not retried until the next discovery.
     @Published private(set) var denied: [UUID: Set<String>] = [:]
+    /// Snapshot of the mount table for the UI, refreshed after every change we make and on
+    /// every reconcile – views must not query the system on each render.
+    @Published private(set) var mountedPaths: Set<String> = []
 
     private var discoveredAt: [UUID: Date] = [:]
     /// Disconnected via the app; stays disconnected until connected again or the app restarts.
@@ -54,6 +50,11 @@ final class ConnectionManager: ObservableObject {
     /// Wrong credentials: no automatic retries, so Windows/AD accounts don't get locked out.
     private var authBlocked: Set<UUID> = []
     private var inFlight: Set<UUID> = []
+    /// A connect was requested while another one was running; run it when that one ends.
+    private var pendingConnect: Set<UUID> = []
+    /// Bumped by disconnect, save and delete. A connect attempt that finds a newer
+    /// generation after one of its waits is outdated and takes back what it mounted.
+    private var generation: [UUID: Int] = [:]
     private var unmounting: Set<String> = []
 
     private let store = ConnectionStore()
@@ -92,7 +93,7 @@ final class ConnectionManager: ObservableObject {
         migrateLegacyMounts { [weak self] in
             guard let self else { return }
             FinderSidebar.migrateToProfileFolders(root: Self.mountRoot)
-            connections.forEach(prepareFinderEntry)
+            connections.forEach { self.prepareFinderEntry($0, addToSidebar: true) }
             reconcile()
         }
     }
@@ -106,38 +107,59 @@ final class ConnectionManager: ObservableObject {
 
     /// Compares the desired state with the mount table and connects what is missing.
     func reconcile() {
-        let mounted = MountTable.mountPoints()
+        let mounted = refreshMountTable()
         for c in connections where !inFlight.contains(c.id) {
+            if paused.contains(c.id) {
+                // Keep a disconnected profile disconnected, also against mounts that finished late.
+                let leftovers = mountsInside(c, mounted: mounted)
+                if !leftovers.isEmpty { unmount(leftovers) }
+                setStatus(.paused, for: c.id)
+                continue
+            }
             pruneMounts(of: c, mounted: mounted)
             let wanted = targets(of: c)
-            let mountedCount = wanted.filter { mounted.contains(mountPoint(for: c, share: $0).path) }.count
+            let mountedCount = wanted.filter { MountTable.isMounted(mountPoint(for: c, share: $0), in: mounted) }.count
             let fresh = !needsDiscovery(c)
 
             if fresh, !wanted.isEmpty, mountedCount == wanted.count {
-                status[c.id] = .connected
+                setStatus(.connected, for: c.id)
                 continue
             }
             if authBlocked.contains(c.id) { continue }
-            if paused.contains(c.id) {
-                status[c.id] = .paused
-                continue
-            }
             if c.mountsAll, fresh, wanted.isEmpty {
-                status[c.id] = .error(tr("No accessible shares found"))
+                setStatus(.error(tr("No accessible shares found")), for: c.id)
                 continue
             }
             guard c.autoConnect else {
                 if mountedCount > 0 {
-                    status[c.id] = .partial(mounted: mountedCount, total: wanted.count, detail: tr("the rest is not connected"))
+                    setStatus(.partial(mounted: mountedCount, total: wanted.count, detail: tr("the rest is not connected")), for: c.id)
                 } else if case .error = status(of: c) {
                     // keep the last error visible
                 } else {
-                    status[c.id] = .disconnected
+                    setStatus(.disconnected, for: c.id)
                 }
                 continue
             }
             if !wanted.isEmpty || c.mountsAll { connect(c, manual: false) }
         }
+    }
+
+    /// Publishes only real changes: every assignment to a @Published property re-renders
+    /// all open views, and the reconcile timer would otherwise do that every 20 seconds.
+    private func setStatus(_ new: ConnectionStatus?, for id: UUID) {
+        guard status[id] != new else { return }
+        status[id] = new
+        if let new {
+            let name = connections.first { $0.id == id }?.name ?? id.uuidString
+            ActivityLog.write("\(name): \(new.label)")
+        }
+    }
+
+    @discardableResult
+    private func refreshMountTable() -> Set<String> {
+        let current = MountTable.mountPoints()
+        if current != mountedPaths { mountedPaths = current }
+        return current
     }
 
     // MARK: - Shares
@@ -162,8 +184,9 @@ final class ConnectionManager: ObservableObject {
         return Date().timeIntervalSince(last) > Self.rediscoveryInterval
     }
 
+    /// For the UI: answers from the cached mount table.
     func isMounted(_ c: Connection, share: String) -> Bool {
-        MountTable.isMounted(mountPoint(for: c, share: share))
+        MountTable.isMounted(mountPoint(for: c, share: share), in: mountedPaths)
     }
 
     func isDenied(_ c: Connection, share: String) -> Bool {
@@ -181,14 +204,8 @@ final class ConnectionManager: ObservableObject {
         // Without a discovery the wanted list of an "all shares" profile is still unknown.
         if c.mountsAll, discovered[c.id] == nil { return }
         let wanted = Set(targets(of: c).map { mountPoint(for: c, share: $0).path })
-        let stale = mountsInside(c, mounted: mounted).filter {
-            !wanted.contains($0.path) && !unmounting.contains($0.path)
-        }
-        guard !stale.isEmpty else { return }
-        stale.forEach { unmounting.insert($0.path) }
-        unmountAll(stale) { [weak self] _ in
-            stale.forEach { self?.unmounting.remove($0.path) }
-        }
+        let stale = mountsInside(c, mounted: mounted).filter { !wanted.contains($0.path) }
+        if !stale.isEmpty { unmount(stale) }
     }
 
     // MARK: - Paths
@@ -204,16 +221,18 @@ final class ConnectionManager: ObservableObject {
         return profileFolder(for: c).appendingPathComponent(name.isEmpty ? "Share" : name, isDirectory: true)
     }
 
-    private func prepareFinderEntry(_ c: Connection) {
+    private func prepareFinderEntry(_ c: Connection, addToSidebar: Bool = false) {
         let folder = profileFolder(for: c)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: folder.appendingPathComponent("Icon\r").path),
            let icon = NSImage(contentsOfFile: "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericFileServerIcon.icns") {
             NSWorkspace.shared.setIcon(icon, forFile: folder.path)
         }
-        FinderSidebar.addOnce(folder, for: c.id)
+        if addToSidebar { FinderSidebar.addOnce(folder, for: c.id) }
     }
 
+    /// Removes the profile's (empty) folders and its sidebar entry. rmdir() only, so nothing
+    /// that is still mounted or has content can be deleted.
     private func removeFinderEntry(_ c: Connection) {
         let folder = profileFolder(for: c)
         FinderSidebar.remove(folder)
@@ -221,11 +240,12 @@ final class ConnectionManager: ObservableObject {
         if let items = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
             items.forEach(Mounter.removeIfEmpty)
         }
-        try? FileManager.default.removeItem(at: folder.appendingPathComponent("Icon\r"))
+        unlink(folder.appendingPathComponent("Icon\r").path)
         Mounter.removeIfEmpty(folder)
     }
 
     /// Up to 0.2 the share was mounted directly on the profile folder; move such mounts.
+    /// Runs once at launch – a failure leaves the profile in an error state instead of retrying.
     private func migrateLegacyMounts(then: @escaping () -> Void) {
         let legacy = connections.map { profileFolder(for: $0) }.filter { MountTable.isMounted($0) }
         unmountAll(legacy) { _ in then() }
@@ -241,81 +261,104 @@ final class ConnectionManager: ObservableObject {
         !paused.contains(c.id) && (c.autoConnect || status(of: c) == .connected)
     }
 
+    private func bumpGeneration(_ id: UUID) {
+        generation[id, default: 0] += 1
+    }
+
     func connect(_ c: Connection, manual: Bool = true) {
-        guard !inFlight.contains(c.id) else { return }
+        guard connections.contains(where: { $0.id == c.id }) else { return }
         if manual {
             paused.remove(c.id)
             authBlocked.remove(c.id)
         }
+        guard !inFlight.contains(c.id) else {
+            // Don't drop it: run it as soon as the current attempt ends.
+            if manual { pendingConnect.insert(c.id) }
+            return
+        }
         // Never create share folders while something is mounted on the profile folder
         // itself (old layout or a manual mount): they would end up on that server.
         if MountTable.isMounted(profileFolder(for: c)) {
-            status[c.id] = .error(tr("The folder “%@” is itself a network drive – please disconnect it", c.mountFolderName))
-            migrateLegacyMounts { [weak self] in self?.reconcile(after: 1) }
+            setStatus(.error(tr("The folder “%@” is itself a network drive – please disconnect it", c.mountFolderName)), for: c.id)
             return
         }
 
         inFlight.insert(c.id)
+        let attempt = generation[c.id, default: 0]
         // While waiting for an unreachable server, keep showing that instead of flickering.
-        if manual || status[c.id] != .unreachable { status[c.id] = .connecting }
+        if manual || status[c.id] != .unreachable { setStatus(.connecting, for: c.id) }
         prepareFinderEntry(c)
 
-        Task {
-            defer { inFlight.remove(c.id) }
+        Task { @MainActor in
             // Off the main thread: the keychain may show an access prompt and block.
-            let password = await Task.detached { Keychain.password(for: c.id) }.value
+            let password = await Blocking.run { Keychain.password(for: c.id) }
+            guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: []) }
             if c.needsPassword, password == nil {
-                status[c.id] = .needsPassword
-                return
+                setStatus(.needsPassword, for: c.id)
+                return finishConnect(c, attempt: attempt, mounted: [])
             }
             guard let host = await Reachability.firstReachable(hosts: c.allHosts, port: c.effectivePort) else {
-                status[c.id] = .unreachable
-                return
+                if isCurrent(c.id, attempt: attempt) { setStatus(.unreachable, for: c.id) }
+                return finishConnect(c, attempt: attempt, mounted: [])
             }
+            guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: []) }
 
             // Listing the shares is also a single login check. If it works, a share that later
             // refuses access is a permission problem and not a wrong password – no lockout risk.
-            var loginVerified = false
             // Always for SMB: macOS falls back to guest access when a mount's login fails, so a
             // wrong password would go unnoticed on servers that allow guests. smbutil doesn't.
+            var loginVerified = false
             if c.kind == .smb {
                 do {
-                    let shares = try await Task.detached {
-                        try ShareBrowser.list(c, host: host, password: password)
-                    }.value
-                    discovered[c.id] = shares
+                    let shares = try await Blocking.run { try ShareBrowser.list(c, host: host, password: password) }
+                    guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: []) }
+                    if discovered[c.id] != shares { discovered[c.id] = shares }
                     discoveredAt[c.id] = Date()
-                    denied[c.id] = []
+                    if denied[c.id]?.isEmpty == false { denied[c.id] = [] }
                     loginVerified = true
                 } catch let error as ShareBrowser.BrowseError where error.isAuthFailure {
+                    guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: []) }
                     authBlocked.insert(c.id)
-                    status[c.id] = .authFailed
-                    return
+                    setStatus(.authFailed, for: c.id)
+                    return finishConnect(c, attempt: attempt, mounted: [])
                 } catch {
+                    guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: []) }
                     if c.mountsAll, discovered[c.id] == nil {
-                        status[c.id] = .error(tr("Could not load the shares: %@", error.localizedDescription))
-                        return
+                        setStatus(.error(tr("Could not load the shares: %@", error.localizedDescription)), for: c.id)
+                        return finishConnect(c, attempt: attempt, mounted: [])
                     }
                 }
             }
 
             let wanted = targets(of: c)
             if wanted.isEmpty {
-                status[c.id] = c.mountsAll ? .error(tr("No accessible shares found")) : .disconnected
-                return
+                setStatus(c.mountsAll ? .error(tr("No accessible shares found")) : .disconnected, for: c.id)
+                return finishConnect(c, attempt: attempt, mounted: [])
             }
+            let alreadyMounted = MountTable.mountPoints()
             let todo = wanted
                 .map { ($0, mountPoint(for: c, share: $0)) }
-                .filter { !MountTable.isMounted($0.1) }
+                .filter { !MountTable.isMounted($0.1, in: alreadyMounted) }
 
             let results = await Self.mount(todo, of: c, host: host, password: password,
                                            parallel: c.kind == .smb ? Self.parallelMounts : 1)
+            let mountedByThisAttempt = results.filter { $0.error == nil }.map { mountPoint(for: c, share: $0.share) }
+            guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: mountedByThisAttempt) }
+
+            for result in results {
+                if let error = result.error as? MountError {
+                    ActivityLog.write("  \(c.name) / \(result.share): error \(error.code) – \(error.localizedDescription)")
+                } else if let error = result.error {
+                    ActivityLog.write("  \(c.name) / \(result.share): \(error.localizedDescription)")
+                }
+            }
 
             let authFailures = results.filter { ($0.error as? MountError)?.isAuthFailure == true }.map(\.share)
             // Windows answers "not found" instead of "access denied" for e.g. C$ when the user
             // lacks rights; a share the server just listed does exist, so that means no access.
             let listed = Set((discovered[c.id] ?? []).map(\.name))
-            let mountedNow = wanted.filter { MountTable.isMounted(mountPoint(for: c, share: $0)) }
+            let nowMounted = MountTable.mountPoints()
+            let mountedNow = wanted.filter { MountTable.isMounted(mountPoint(for: c, share: $0), in: nowMounted) }
             // Same for shares that never answer while other shares of the same login do mount
             // (a successful listing is not enough: then the whole server may be the problem).
             let hiddenFromUser = results
@@ -329,41 +372,64 @@ final class ConnectionManager: ObservableObject {
                     denied[c.id, default: []].formUnion(authFailures)
                 } else {
                     authBlocked.insert(c.id)
-                    status[c.id] = .authFailed
-                    return
+                    setStatus(.authFailed, for: c.id)
+                    return finishConnect(c, attempt: attempt, mounted: [])
                 }
             }
-            denied[c.id, default: []].formUnion(hiddenFromUser)
+            if !hiddenFromUser.isEmpty { denied[c.id, default: []].formUnion(hiddenFromUser) }
             let noAccess = Set(authFailures + hiddenFromUser)
-            let failures = results
-                .filter { $0.error != nil && !noAccess.contains($0.share) }
-                .map { "\($0.share): \($0.error!.localizedDescription)" }
-
-            for result in results {
-                if let error = result.error as? MountError {
-                    ActivityLog.write("  \(c.name) / \(result.share): error \(error.code) – \(error.localizedDescription)")
-                } else if let error = result.error {
-                    ActivityLog.write("  \(c.name) / \(result.share): \(error.localizedDescription)")
-                }
+            let failures = results.compactMap { result -> String? in
+                guard let error = result.error, !noAccess.contains(result.share) else { return nil }
+                return "\(result.share): \(error.localizedDescription)"
             }
 
             let total = targets(of: c).count
             if total == 0, !results.isEmpty {
                 let names = (denied[c.id] ?? []).sorted().joined(separator: ", ")
-                status[c.id] = .error(failures.isEmpty
+                setStatus(.error(failures.isEmpty
                     ? tr("No access to %@ – the login works, but the server refuses these shares", names)
-                    : failures.joined(separator: "; "))
+                    : failures.joined(separator: "; ")), for: c.id)
             } else if mountedNow.count == total {
-                status[c.id] = .connected
+                setStatus(.connected, for: c.id)
             } else if !mountedNow.isEmpty {
-                status[c.id] = .partial(mounted: mountedNow.count, total: total, detail: failures.joined(separator: "; "))
+                setStatus(.partial(mounted: mountedNow.count, total: total, detail: failures.joined(separator: "; ")), for: c.id)
             } else {
-                status[c.id] = .error(failures.isEmpty ? tr("No share connected") : failures.joined(separator: "; "))
+                setStatus(.error(failures.isEmpty ? tr("No share connected") : failures.joined(separator: "; ")), for: c.id)
             }
+            finishConnect(c, attempt: attempt, mounted: [])
         }
     }
 
-    /// Mounts with limited parallelism; NetFS calls block, so they run off the main actor.
+    /// Still the attempt the user wants: not disconnected, edited or deleted meanwhile.
+    private func isCurrent(_ id: UUID, attempt: Int) -> Bool {
+        generation[id, default: 0] == attempt && !paused.contains(id) && connections.contains { $0.id == id }
+    }
+
+    /// Ends a connect attempt. An outdated one first takes back what it mounted; then a
+    /// connect that was requested meanwhile (or the one for the new settings) runs.
+    private func finishConnect(_ c: Connection, attempt: Int, mounted: [URL]) {
+        let outdated = !isCurrent(c.id, attempt: attempt)
+        let done = { [weak self] in
+            guard let self else { return }
+            inFlight.remove(c.id)
+            refreshMountTable()
+            if outdated, !connections.contains(where: { $0.id == c.id }) {
+                removeFinderEntry(c)
+            }
+            if pendingConnect.remove(c.id) != nil || outdated,
+               let current = connections.first(where: { $0.id == c.id }), !paused.contains(c.id) {
+                connect(current, manual: false)
+            }
+        }
+        if outdated, !mounted.isEmpty {
+            unmount(mounted) { _ in done() }
+        } else {
+            done()
+        }
+    }
+
+    /// Mounts with limited parallelism. The blocking work runs on the Blocking queue, so the
+    /// child tasks only wait and never hold a thread of the cooperative pool.
     nonisolated private static func mount(
         _ todo: [(String, URL)], of c: Connection, host: String, password: String?, parallel: Int
     ) async -> [(share: String, error: Error?)] {
@@ -374,7 +440,7 @@ final class ConnectionManager: ObservableObject {
                 guard let (share, url) = pending.popFirst() else { return }
                 group.addTask {
                     do {
-                        try Mounter.mount(c, share: share, host: host, password: password, at: url)
+                        try await Blocking.run { try Mounter.mount(c, share: share, host: host, password: password, at: url) }
                         return (share, nil)
                     } catch {
                         return (share, error)
@@ -392,14 +458,32 @@ final class ConnectionManager: ObservableObject {
 
     func disconnect(_ c: Connection, then: (() -> Void)? = nil) {
         paused.insert(c.id)
+        pendingConnect.remove(c.id)
+        bumpGeneration(c.id)
         let mounted = mountsInside(c, mounted: MountTable.mountPoints())
-        unmountAll(mounted) { errors in
-            if let error = errors.first {
-                self.status[c.id] = .error(tr("Disconnecting failed: %@", error.localizedDescription))
-            } else {
-                self.status[c.id] = .paused
+        unmount(mounted) { [weak self] errors in
+            guard let self else { return }
+            // The user may have reconnected meanwhile – then that attempt owns the status.
+            if paused.contains(c.id) {
+                if let error = errors.first {
+                    setStatus(.error(tr("Disconnecting failed: %@", error.localizedDescription)), for: c.id)
+                } else {
+                    setStatus(.paused, for: c.id)
+                }
             }
             then?()
+        }
+    }
+
+    /// Unmounts `urls` (skipping those already being unmounted) and reports on the main actor.
+    private func unmount(_ urls: [URL], completion: (([Error]) -> Void)? = nil) {
+        let fresh = urls.filter { !unmounting.contains($0.path) }
+        fresh.forEach { unmounting.insert($0.path) }
+        unmountAll(fresh) { [weak self] errors in
+            guard let self else { return }
+            fresh.forEach { self.unmounting.remove($0.path) }
+            refreshMountTable()
+            completion?(errors)
         }
     }
 
@@ -443,12 +527,12 @@ final class ConnectionManager: ObservableObject {
         }
         authBlocked.remove(c.id)
         paused.remove(c.id)
-        status[c.id] = nil
+        setStatus(nil, for: c.id)
 
         guard let index = connections.firstIndex(where: { $0.id == c.id }) else {
             connections.append(c)
             store.save(connections)
-            prepareFinderEntry(c)
+            prepareFinderEntry(c, addToSidebar: true)
             if c.autoConnect { connect(c) } else { reconcile() }
             return
         }
@@ -464,6 +548,7 @@ final class ConnectionManager: ObservableObject {
         comparable.includeHiddenShares = c.includeHiddenShares
         comparable.excludedShares = c.excludedShares
         comparable.autoConnect = c.autoConnect
+        comparable.color = c.color
         let loginChanged = comparable != c || password?.isEmpty == false
 
         guard loginChanged else {
@@ -472,13 +557,17 @@ final class ConnectionManager: ObservableObject {
             return
         }
 
+        // A connect still running with the old settings is now outdated.
+        bumpGeneration(c.id)
         discovered[c.id] = nil
         discoveredAt[c.id] = nil
         denied[c.id] = nil
-        unmountAll(mountsInside(old, mounted: MountTable.mountPoints())) { [weak self] _ in
+        unmount(mountsInside(old, mounted: MountTable.mountPoints())) { [weak self] _ in
             guard let self else { return }
-            if old.mountFolderName != c.mountFolderName { removeFinderEntry(old) }
-            prepareFinderEntry(c)
+            if old.mountFolderName != c.mountFolderName {
+                removeFinderEntry(old)
+                prepareFinderEntry(c, addToSidebar: true)
+            }
             if c.autoConnect { connect(c) } else { reconcile() }
         }
     }
@@ -487,24 +576,28 @@ final class ConnectionManager: ObservableObject {
         disconnect(c) { [weak self] in
             guard let self else { return }
             Keychain.delete(for: c.id)
-            removeFinderEntry(c)
             connections.removeAll { $0.id == c.id }
-            status[c.id] = nil
+            removeFinderEntry(c)
+            setStatus(nil, for: c.id)
             discovered[c.id] = nil
             discoveredAt[c.id] = nil
             denied[c.id] = nil
             paused.remove(c.id)
             authBlocked.remove(c.id)
+            pendingConnect.remove(c.id)
+            generation[c.id] = nil
             store.save(connections)
         }
     }
 
+    /// Unique by folder name, not just by display name: "A/B" and "A - B" would share a folder,
+    /// and the two profiles would then unmount each other's shares forever.
     private func uniqueName(_ name: String, excluding id: UUID) -> String {
         let base = name.isEmpty ? "Server" : name
-        let taken = Set(connections.filter { $0.id != id }.map { $0.name.lowercased() })
+        let taken = Set(connections.filter { $0.id != id }.map { $0.mountFolderName.lowercased() })
         var candidate = base
         var n = 2
-        while taken.contains(candidate.lowercased()) {
+        while taken.contains(Connection.folderName(candidate).lowercased()) {
             candidate = "\(base) \(n)"
             n += 1
         }
@@ -514,8 +607,7 @@ final class ConnectionManager: ObservableObject {
     // MARK: - Overview
 
     var mountedShareCount: Int {
-        let mounted = MountTable.mountPoints()
-        return connections.reduce(0) { $0 + mountsInside($1, mounted: mounted).count }
+        connections.reduce(0) { $0 + mountsInside($1, mounted: mountedPaths).count }
     }
 
     var menuBarSymbol: String {

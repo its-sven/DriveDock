@@ -194,42 +194,117 @@ enum Mounter {
         return String(cString: buffer)
     }
 
+    static let unmountTimeout: TimeInterval = 20
+
+    /// Unmounts without any UI and always calls `completion` once – after `unmountTimeout`
+    /// with ETIMEDOUT if the system doesn't answer.
     static func unmount(at mountPoint: URL, completion: @escaping (Error?) -> Void) {
-        FileManager.default.unmountVolume(at: mountPoint, options: []) { error in
+        final class Once: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func claim() -> Bool {
+                lock.lock(); defer { lock.unlock() }
+                if done { return false }
+                done = true
+                return true
+            }
+        }
+        let once = Once()
+        FileManager.default.unmountVolume(at: mountPoint, options: [.withoutUI]) { error in
+            guard once.claim() else { return }
             if error == nil { removeIfEmpty(mountPoint) }
             completion(error)
         }
+        DispatchQueue.global().asyncAfter(deadline: .now() + unmountTimeout) {
+            guard once.claim() else { return }
+            completion(MountError(code: ETIMEDOUT))
+        }
     }
 
+    /// Removes `dir` only if it is an empty folder. rmdir() never deletes contents and
+    /// refuses a mount point (EBUSY), so a share that gets mounted at the same moment is
+    /// safe – unlike a "check if empty, then removeItem" sequence.
     static func removeIfEmpty(_ dir: URL) {
-        guard !MountTable.isMounted(dir),
-              let items = try? FileManager.default.contentsOfDirectory(atPath: dir.path),
-              items.isEmpty else { return }
-        try? FileManager.default.removeItem(at: dir)
+        rmdir(dir.path)
     }
 }
 
 enum MountTable {
-    /// Current mount points, read without touching the (possibly dead) network file systems.
+    /// Current mount points, read from the kernel's mount table without touching the
+    /// (possibly unreachable) network file systems themselves.
+    ///
+    /// Uses getfsstat() with a buffer of our own: getmntinfo() keeps one buffer per process
+    /// and frees it on the next call, which crashes (double free) when mounts running in
+    /// parallel read the table at the same moment.
     static func mountPoints() -> Set<String> {
-        var buffer: UnsafeMutablePointer<statfs>?
-        let count = getmntinfo(&buffer, MNT_NOWAIT)
-        guard count > 0, let buffer else { return [] }
-        var result = Set<String>()
-        for i in 0..<Int(count) {
-            var fs = buffer[i]
-            let path = withUnsafePointer(to: &fs.f_mntonname) {
-                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
-            }
-            result.insert(path)
+        if let current = readMountTable() {
+            lastKnown.set(current)
+            return current
         }
-        return result
+        // Treating everything as unmounted would remount on top of live mounts.
+        return lastKnown.get()
+    }
+
+    private static let lastKnown = LockedValue<Set<String>>([])
+
+    private static func readMountTable() -> Set<String>? {
+        for _ in 0..<3 {
+            let needed = getfsstat(nil, 0, MNT_NOWAIT)
+            guard needed > 0 else { return nil }
+            // Some slack in case mounts appear between the two calls.
+            let capacity = Int(needed) + 8
+            let buffer = UnsafeMutablePointer<statfs>.allocate(capacity: capacity)
+            defer { buffer.deallocate() }
+            let count = Int(getfsstat(buffer, Int32(capacity * MemoryLayout<statfs>.stride), MNT_NOWAIT))
+            guard count >= 0 else { return nil }
+            // A completely filled buffer may have been too small – read again.
+            if count < capacity {
+                return Set((0..<count).map { mountPath(buffer[$0]) })
+            }
+        }
+        return nil
+    }
+
+    private static func mountPath(_ entry: statfs) -> String {
+        var entry = entry
+        return withUnsafePointer(to: &entry.f_mntonname) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+        }
     }
 
     static func isMounted(_ url: URL) -> Bool {
-        // The mount table keeps the real path (e.g. /private/tmp), URL standardizing may not.
-        let mounted = mountPoints()
-        return [url.path, url.standardizedFileURL.path, url.resolvingSymlinksInPath().path]
-            .contains { mounted.contains($0) }
+        isMounted(url, in: mountPoints())
+    }
+
+    /// Pure string comparison – resolving symlinks would touch the file system, which can
+    /// hang for a mount whose server is gone.
+    static func isMounted(_ url: URL, in mounted: Set<String>) -> Bool {
+        let path = url.path
+        let standardized = url.standardizedFileURL.path
+        return mounted.contains(path) || mounted.contains(standardized)
+            || mounted.contains("/private" + path) || mounted.contains("/private" + standardized)
+    }
+}
+
+/// A value guarded by a lock, for state shared between threads.
+final class LockedValue<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) { self.value = value }
+
+    func get() -> Value {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ newValue: Value) {
+        lock.lock(); defer { lock.unlock() }
+        value = newValue
+    }
+
+    func modify(_ body: (inout Value) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        body(&value)
     }
 }

@@ -9,6 +9,11 @@ enum FinderSidebar {
         LSSharedFileListCreate(nil, kLSSharedFileListFavoriteItems.takeUnretainedValue(), nil)?.takeRetainedValue()
     }
 
+    /// Resolving a favorite must never mount a volume or show UI: an old entry may point to
+    /// a share whose server is offline, and this runs on the main thread.
+    private static let resolveFlags = LSSharedFileListResolutionFlags(
+        kLSSharedFileListNoUserInteraction | kLSSharedFileListDoNotMountVolumes)
+
     private static func items(of list: LSSharedFileList) -> [LSSharedFileListItem] {
         var seed: UInt32 = 0
         return (LSSharedFileListCopySnapshot(list, &seed)?.takeRetainedValue() as? [LSSharedFileListItem]) ?? []
@@ -18,7 +23,7 @@ enum FinderSidebar {
         guard let list = favorites() else { return false }
         let target = url.standardizedFileURL.path
         return items(of: list).contains { item in
-            let resolved = LSSharedFileListItemCopyResolvedURL(item, 0, nil)?.takeRetainedValue() as URL?
+            let resolved = LSSharedFileListItemCopyResolvedURL(item, resolveFlags, nil)?.takeRetainedValue() as URL?
             return resolved?.standardizedFileURL.path == target
         }
     }
@@ -33,7 +38,7 @@ enum FinderSidebar {
         guard let list = favorites() else { return }
         let target = url.standardizedFileURL.path
         for item in items(of: list) {
-            let resolved = LSSharedFileListItemCopyResolvedURL(item, 0, nil)?.takeRetainedValue() as URL?
+            let resolved = LSSharedFileListItemCopyResolvedURL(item, resolveFlags, nil)?.takeRetainedValue() as URL?
             if resolved?.standardizedFileURL.path == target {
                 LSSharedFileListItemRemove(list, item)
             }
@@ -43,13 +48,14 @@ enum FinderSidebar {
     // Remembers which connections already got their entry, so one the user removed stays removed.
     private static let addedKey = "sidebarConnectionIDs"
 
+    /// Tries once per profile. Even if adding fails (e.g. an empty favorites list), the
+    /// attempt is recorded, so it isn't retried on every reconnect.
     static func addOnce(_ url: URL, for id: UUID) {
         var added = Set(UserDefaults.standard.stringArray(forKey: addedKey) ?? [])
         guard !added.contains(id.uuidString) else { return }
-        if contains(url) || add(url) {
-            added.insert(id.uuidString)
-            UserDefaults.standard.set(Array(added), forKey: addedKey)
-        }
+        if !contains(url) { add(url) }
+        added.insert(id.uuidString)
+        UserDefaults.standard.set(Array(added), forKey: addedKey)
     }
 
     static func forget(_ id: UUID) {
@@ -65,7 +71,7 @@ enum FinderSidebar {
         guard UserDefaults.standard.integer(forKey: key) < 2, let list = favorites() else { return }
         let rootPath = root.standardizedFileURL.path
         for item in items(of: list) {
-            guard let path = (LSSharedFileListItemCopyResolvedURL(item, 0, nil)?.takeRetainedValue() as URL?)?
+            guard let path = (LSSharedFileListItemCopyResolvedURL(item, resolveFlags, nil)?.takeRetainedValue() as URL?)?
                 .standardizedFileURL.path else { continue }
             if path.hasPrefix(rootPath + "/") {
                 LSSharedFileListItemRemove(list, item)
