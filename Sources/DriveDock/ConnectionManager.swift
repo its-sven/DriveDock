@@ -46,7 +46,12 @@ final class ConnectionManager: ObservableObject {
 
     private var discoveredAt: [UUID: Date] = [:]
     /// Disconnected via the app; stays disconnected until connected again or the app restarts.
-    private var paused: Set<UUID> = []
+    /// Published, so switches and buttons flip the moment the user clicks.
+    @Published private(set) var paused: Set<UUID> = []
+    /// Profiles with a saved password. Kept in the preferences, so the editor knows it without
+    /// asking the keychain – which can be blocked by a pending keychain prompt.
+    @Published private(set) var storedPasswords: Set<UUID> = []
+    private static let storedPasswordsKey = "profilesWithPassword"
     /// Wrong credentials: no automatic retries, so Windows/AD accounts don't get locked out.
     private var authBlocked: Set<UUID> = []
     private var inFlight: Set<UUID> = []
@@ -71,7 +76,8 @@ final class ConnectionManager: ObservableObject {
 
     private func start() {
         try? FileManager.default.createDirectory(at: Self.mountRoot, withIntermediateDirectories: true)
-        FinderSidebar.addOnFirstLaunch(Self.mountRoot)
+        let root = Self.mountRoot
+        FinderSidebar.perform { FinderSidebar.addOnFirstLaunch(root) }
 
         timer = Timer.scheduledTimer(withTimeInterval: Self.retryInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.reconcile() }
@@ -90,12 +96,39 @@ final class ConnectionManager: ObservableObject {
             })
         }
 
+        loadStoredPasswordFlags()
+
         migrateLegacyMounts { [weak self] in
             guard let self else { return }
-            FinderSidebar.migrateToProfileFolders(root: Self.mountRoot)
+            let root = Self.mountRoot
+            FinderSidebar.perform { FinderSidebar.migrateToProfileFolders(root: root) }
             connections.forEach { self.prepareFinderEntry($0, addToSidebar: true) }
             reconcile()
         }
+    }
+
+    func hasStoredPassword(_ id: UUID) -> Bool {
+        storedPasswords.contains(id)
+    }
+
+    private func loadStoredPasswordFlags() {
+        if let ids = UserDefaults.standard.stringArray(forKey: Self.storedPasswordsKey) {
+            storedPasswords = Set(ids.compactMap(UUID.init(uuidString:)))
+            return
+        }
+        // First launch of 0.5.2: older versions kept one keychain item per profile; checking
+        // that they exist reads attributes only and never shows a prompt.
+        let ids = connections.map(\.id)
+        Task {
+            let found = await Blocking.run { Set(ids.filter { Keychain.legacyItemExists(for: $0) }) }
+            found.forEach { self.setPasswordStored(true, for: $0) }
+            if found.isEmpty { UserDefaults.standard.set([String](), forKey: Self.storedPasswordsKey) }
+        }
+    }
+
+    private func setPasswordStored(_ stored: Bool, for id: UUID) {
+        if stored { storedPasswords.insert(id) } else { storedPasswords.remove(id) }
+        UserDefaults.standard.set(storedPasswords.map(\.uuidString), forKey: Self.storedPasswordsKey)
     }
 
     func reconcile(after delay: TimeInterval) {
@@ -152,6 +185,20 @@ final class ConnectionManager: ObservableObject {
         if let new {
             let name = connections.first { $0.id == id }?.name ?? id.uuidString
             ActivityLog.write("\(name): \(new.label)")
+        }
+    }
+
+    private var refreshScheduled = false
+
+    /// Coalesces refreshes while many shares mount: every publish re-renders all open views,
+    /// so at most about three updates per second instead of one per share.
+    private func scheduleMountTableRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            refreshScheduled = false
+            refreshMountTable()
         }
     }
 
@@ -213,7 +260,9 @@ final class ConnectionManager: ObservableObject {
     /// The profile's folder, e.g. ~/Network Drives/Fileserver (Admin). A plain folder, so Finder
     /// shows the profile name; the shares inside are mount points.
     func profileFolder(for c: Connection) -> URL {
-        Self.mountRoot.appendingPathComponent(c.mountFolderName, isDirectory: true).standardizedFileURL
+        // No .standardizedFileURL: it checks reachability on disk, and this runs for every
+        // row of the UI on every render.
+        Self.mountRoot.appendingPathComponent(c.mountFolderName, isDirectory: true)
     }
 
     func mountPoint(for c: Connection, share: String) -> URL {
@@ -228,15 +277,21 @@ final class ConnectionManager: ObservableObject {
            let icon = NSImage(contentsOfFile: "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericFileServerIcon.icns") {
             NSWorkspace.shared.setIcon(icon, forFile: folder.path)
         }
-        if addToSidebar { FinderSidebar.addOnce(folder, for: c.id) }
+        if addToSidebar {
+            let id = c.id
+            FinderSidebar.perform { FinderSidebar.addOnce(folder, for: id) }
+        }
     }
 
     /// Removes the profile's (empty) folders and its sidebar entry. rmdir() only, so nothing
     /// that is still mounted or has content can be deleted.
     private func removeFinderEntry(_ c: Connection) {
         let folder = profileFolder(for: c)
-        FinderSidebar.remove(folder)
-        FinderSidebar.forget(c.id)
+        let id = c.id
+        FinderSidebar.perform {
+            FinderSidebar.remove(folder)
+            FinderSidebar.forget(id)
+        }
         if let items = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
             items.forEach(Mounter.removeIfEmpty)
         }
@@ -290,12 +345,25 @@ final class ConnectionManager: ObservableObject {
         prepareFinderEntry(c)
 
         Task { @MainActor in
-            // Off the main thread: the keychain may show an access prompt and block.
-            let password = await Blocking.run { Keychain.password(for: c.id) }
-            guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: []) }
-            if c.needsPassword, password == nil {
-                setStatus(.needsPassword, for: c.id)
-                return finishConnect(c, attempt: attempt, mounted: [])
+            // Only profiles that log in with a password need the keychain. Off the main thread:
+            // it may show a prompt and block. Automatic retries don't ask again after a denial.
+            var password: String?
+            if c.needsPassword {
+                let id = c.id
+                let lookup = await Blocking.run { Keychain.password(for: id, allowPrompt: manual) }
+                guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: []) }
+                switch lookup {
+                case .found(let found):
+                    password = found
+                case .missing:
+                    setStatus(.needsPassword, for: c.id)
+                    return finishConnect(c, attempt: attempt, mounted: [])
+                case .unavailable:
+                    // Like a failed login: no automatic retries until the user connects again.
+                    authBlocked.insert(c.id)
+                    setStatus(.error(tr("The keychain didn't release the password – click Connect to try again")), for: c.id)
+                    return finishConnect(c, attempt: attempt, mounted: [])
+                }
             }
             guard let host = await Reachability.firstReachable(hosts: c.allHosts, port: c.effectivePort) else {
                 if isCurrent(c.id, attempt: attempt) { setStatus(.unreachable, for: c.id) }
@@ -340,8 +408,11 @@ final class ConnectionManager: ObservableObject {
                 .map { ($0, mountPoint(for: c, share: $0)) }
                 .filter { !MountTable.isMounted($0.1, in: alreadyMounted) }
 
+            // Show shares as they come in, not only once all of them are done.
             let results = await Self.mount(todo, of: c, host: host, password: password,
-                                           parallel: c.kind == .smb ? Self.parallelMounts : 1)
+                                           parallel: c.kind == .smb ? Self.parallelMounts : 1) { [weak self] in
+                await self?.scheduleMountTableRefresh()
+            }
             let mountedByThisAttempt = results.filter { $0.error == nil }.map { mountPoint(for: c, share: $0.share) }
             guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: mountedByThisAttempt) }
 
@@ -369,14 +440,14 @@ final class ConnectionManager: ObservableObject {
                 .map(\.share)
             if !authFailures.isEmpty {
                 if loginVerified || !mountedNow.isEmpty {
-                    denied[c.id, default: []].formUnion(authFailures)
+                    addDenied(authFailures, for: c.id)
                 } else {
                     authBlocked.insert(c.id)
                     setStatus(.authFailed, for: c.id)
                     return finishConnect(c, attempt: attempt, mounted: [])
                 }
             }
-            if !hiddenFromUser.isEmpty { denied[c.id, default: []].formUnion(hiddenFromUser) }
+            addDenied(hiddenFromUser, for: c.id)
             let noAccess = Set(authFailures + hiddenFromUser)
             let failures = results.compactMap { result -> String? in
                 guard let error = result.error, !noAccess.contains(result.share) else { return nil }
@@ -398,6 +469,12 @@ final class ConnectionManager: ObservableObject {
             }
             finishConnect(c, attempt: attempt, mounted: [])
         }
+    }
+
+    private func addDenied(_ shares: [String], for id: UUID) {
+        let current = denied[id] ?? []
+        guard !Set(shares).isSubset(of: current) else { return }
+        denied[id] = current.union(shares)
     }
 
     /// Still the attempt the user wants: not disconnected, edited or deleted meanwhile.
@@ -431,7 +508,8 @@ final class ConnectionManager: ObservableObject {
     /// Mounts with limited parallelism. The blocking work runs on the Blocking queue, so the
     /// child tasks only wait and never hold a thread of the cooperative pool.
     nonisolated private static func mount(
-        _ todo: [(String, URL)], of c: Connection, host: String, password: String?, parallel: Int
+        _ todo: [(String, URL)], of c: Connection, host: String, password: String?, parallel: Int,
+        progress: @escaping @Sendable () async -> Void
     ) async -> [(share: String, error: Error?)] {
         await withTaskGroup(of: (share: String, error: Error?).self) { group in
             var pending = todo[...]
@@ -451,6 +529,7 @@ final class ConnectionManager: ObservableObject {
             while let result = await group.next() {
                 results.append(result)
                 addNext()
+                if result.error == nil { await progress() }
             }
             return results
         }
@@ -461,6 +540,7 @@ final class ConnectionManager: ObservableObject {
         pendingConnect.remove(c.id)
         bumpGeneration(c.id)
         let mounted = mountsInside(c, mounted: MountTable.mountPoints())
+        setStatus(mounted.isEmpty ? .paused : .disconnecting, for: c.id)
         unmount(mounted) { [weak self] errors in
             guard let self else { return }
             // The user may have reconnected meanwhile – then that attempt owns the status.
@@ -487,23 +567,20 @@ final class ConnectionManager: ObservableObject {
         }
     }
 
-    /// Unmounts one after another and reports all errors on the main actor.
+    /// Unmounts all at once (each with its own timeout) and reports all errors on the main actor.
     private func unmountAll(_ urls: [URL], completion: @escaping ([Error]) -> Void) {
-        var remaining = urls
+        guard !urls.isEmpty else { return completion([]) }
+        var remaining = urls.count
         var errors: [Error] = []
-        func next() {
-            guard let url = remaining.popLast() else {
-                completion(errors)
-                return
-            }
+        for url in urls {
             Mounter.unmount(at: url) { error in
                 Task { @MainActor in
                     if let error { errors.append(error) }
-                    next()
+                    remaining -= 1
+                    if remaining == 0 { completion(errors) }
                 }
             }
         }
-        next()
     }
 
     func connectAll() {
@@ -522,24 +599,38 @@ final class ConnectionManager: ObservableObject {
         var c = connection
         c.name = uniqueName(c.name.trimmingCharacters(in: .whitespaces), excluding: c.id)
         c.shares = c.shares.map(Connection.normalizedShare).filter { !$0.isEmpty }
-        if let password, !password.isEmpty {
-            Keychain.setPassword(password, for: c.id, label: c.name)
-        }
         authBlocked.remove(c.id)
         paused.remove(c.id)
         setStatus(nil, for: c.id)
 
-        guard let index = connections.firstIndex(where: { $0.id == c.id }) else {
+        let old = connections.first { $0.id == c.id }
+        if let index = connections.firstIndex(where: { $0.id == c.id }) {
+            connections[index] = c
+        } else {
             connections.append(c)
-            store.save(connections)
             prepareFinderEntry(c, addToSidebar: true)
+        }
+        store.save(connections)
+
+        guard let password, !password.isEmpty else {
+            return applySaved(c, old: old, passwordChanged: false)
+        }
+        // The keychain write may wait for a prompt, so it runs off the main thread – and the
+        // connect only afterwards, so it already finds the new password.
+        let id = c.id
+        Task {
+            let stored = await Blocking.run { Keychain.setPassword(password, for: id) }
+            if stored { setPasswordStored(true, for: id) }
+            applySaved(c, old: old, passwordChanged: true)
+        }
+    }
+
+    /// Connects or remounts after a save.
+    private func applySaved(_ c: Connection, old: Connection?, passwordChanged: Bool) {
+        guard let old else {
             if c.autoConnect { connect(c) } else { reconcile() }
             return
         }
-
-        let old = connections[index]
-        connections[index] = c
-        store.save(connections)
 
         // Share selection alone can be applied live; anything about server or login needs a remount.
         var comparable = old
@@ -549,7 +640,7 @@ final class ConnectionManager: ObservableObject {
         comparable.excludedShares = c.excludedShares
         comparable.autoConnect = c.autoConnect
         comparable.color = c.color
-        let loginChanged = comparable != c || password?.isEmpty == false
+        let loginChanged = comparable != c || passwordChanged
 
         guard loginChanged else {
             pruneMounts(of: c, mounted: MountTable.mountPoints())
@@ -575,7 +666,9 @@ final class ConnectionManager: ObservableObject {
     func delete(_ c: Connection) {
         disconnect(c) { [weak self] in
             guard let self else { return }
-            Keychain.delete(for: c.id)
+            let id = c.id
+            Task { await Blocking.run { Keychain.delete(for: id) } }
+            setPasswordStored(false, for: c.id)
             connections.removeAll { $0.id == c.id }
             removeFinderEntry(c)
             setStatus(nil, for: c.id)

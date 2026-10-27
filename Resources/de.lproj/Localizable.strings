@@ -45,6 +45,7 @@
 "Default (%lld)" = "Standard (%lld)";
 "Disconnect" = "Trennen";
 "Disconnected" = "Getrennt";
+"Disconnecting …" = "Trenne …";
 "Disconnected (manually)" = "Getrennt (manuell)";
 "Disconnecting failed: %@" = "Trennen fehlgeschlagen: %@";
 "Domain" = "Domäne";
@@ -131,6 +132,7 @@
 "So your drives are there right after startup" = "Damit deine Laufwerke nach dem Hochfahren sofort da sind";
 "Startup" = "Start";
 "Teal" = "Türkis";
+"The keychain didn't release the password – click Connect to try again" = "Der Schlüsselbund hat das Passwort nicht freigegeben – zum erneuten Versuch auf Verbinden klicken";
 "The folder “%@” is itself a network drive – please disconnect it" = "Der Ordner „%@“ ist selbst ein Netzlaufwerk – bitte trennen";
 "the rest is not connected" = "Rest nicht verbunden";
 "The server lists these shares, but this user may not open them." = "Diese Freigaben listet der Server, der Benutzer darf sie aber nicht öffnen.";

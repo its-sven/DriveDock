@@ -53,6 +53,7 @@ extension ConnectionStatus {
         case .paused: tr("Disconnected")
         case .connecting: tr("Connecting …")
         case .connected: tr("Connected")
+        case .disconnecting: tr("Disconnecting …")
         case .partial(let mounted, let total, _): tr("%lld of %lld connected", mounted, total)
         case .unreachable: tr("Not reachable")
         case .needsPassword: tr("Password missing")

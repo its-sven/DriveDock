@@ -194,7 +194,7 @@ private struct ServerCard: View {
 
     private func subtitle(_ status: ConnectionStatus) -> String {
         switch status {
-        case .connected, .connecting, .disconnected, .paused:
+        case .connected, .connecting, .disconnecting, .disconnected, .paused:
             "\(connection.displayUser) · \(status.shortLabel)"
         default:
             status.label

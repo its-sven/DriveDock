@@ -2,10 +2,11 @@
 # Creates a self-signed code signing certificate for release builds and prints it as
 # base64 for the GitHub secrets RELEASE_CERT_P12 / RELEASE_CERT_PASSWORD.
 #
-# Why: ad hoc signed builds get a new identity with every release, so macOS asks users
-# for keychain access again after each update. Signing every release with the same
-# certificate keeps that permission. It does NOT replace an Apple Developer ID –
-# Gatekeeper still asks on first launch (see docs/RELEASING.md).
+# Why: ad hoc signed builds get a new code identity with every release, so privacy
+# permissions (e.g. local network access) may be requested again after an update. Signing
+# every release with the same certificate keeps them. It does NOT replace an Apple-issued
+# certificate: Gatekeeper still asks on first launch, and without a Team ID the keychain
+# still asks once per update (see docs/RELEASING.md).
 #
 # Usage: scripts/make-release-cert.sh [output-dir]
 set -euo pipefail

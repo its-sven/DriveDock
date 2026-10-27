@@ -5,6 +5,21 @@ import Foundation
 /// only way to do this; note that kLSSharedFileListItemLast crashes on current macOS,
 /// so new items are inserted after the last existing one.
 enum FinderSidebar {
+    /// LSSharedFileList resolves every favorite (iCloud, OneDrive …), which can take a
+    /// noticeable moment. All sidebar work runs here, one call after another, never on main.
+    private static let queue = DispatchQueue(label: "DriveDock.sidebar", qos: .utility)
+
+    static func perform(_ work: @escaping @Sendable () -> Void) {
+        queue.async(execute: work)
+    }
+
+    /// `contains` for the UI, answered off the main thread.
+    static func isListed(_ url: URL) async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: contains(url)) }
+        }
+    }
+
     private static func favorites() -> LSSharedFileList? {
         LSSharedFileListCreate(nil, kLSSharedFileListFavoriteItems.takeUnretainedValue(), nil)?.takeRetainedValue()
     }

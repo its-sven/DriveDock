@@ -152,9 +152,17 @@ struct SettingsView: View {
     /// Opens an unsaved copy (incl. password) – typically to change only the user.
     private func duplicate(_ c: Connection) {
         let draft = c.duplicate()
-        state.draftPassword = Keychain.password(for: c.id) ?? ""
-        state.draft = draft
-        state.selection = .new(draft.id)
+        let id = c.id
+        Task {
+            // Off the main thread: reading a password can show a keychain prompt.
+            if case .found(let password) = await Blocking.run({ Keychain.password(for: id) }) {
+                state.draftPassword = password
+            } else {
+                state.draftPassword = ""
+            }
+            state.draft = draft
+            state.selection = .new(draft.id)
+        }
     }
 }
 
@@ -191,12 +199,8 @@ private final class EditorState: ObservableObject {
     @Published var sharesError: String?
     @Published var search = ""
     @Published var newShare = ""
-    /// Read once when the editor opens – the view struct itself is re-created on every render.
-    let hasStoredPassword: Bool
-
     init(_ c: Connection) {
         draft = c
-        hasStoredPassword = Keychain.hasPassword(for: c.id)
         alternateHosts = c.alternateHosts.joined(separator: ", ")
         portText = c.port.map(String.init) ?? ""
     }
@@ -211,7 +215,7 @@ struct ServerEditor: View {
     var onDuplicate: (() -> Void)?
 
     @StateObject private var s: EditorState
-    private var hasStoredPassword: Bool { s.hasStoredPassword }
+    private var hasStoredPassword: Bool { manager.hasStoredPassword(original.id) }
 
     init(original: Connection, isNew: Bool, initialPassword: String = "",
          onSaved: @escaping (UUID) -> Void, onDelete: @escaping () -> Void, onDuplicate: (() -> Void)? = nil) {
@@ -600,7 +604,10 @@ struct ServerEditor: View {
         s.sharesError = nil
         Task {
             defer { s.loadingShares = false }
-            let password: String? = typed.isEmpty ? await Blocking.run { Keychain.password(for: id) } : typed
+            var password: String? = typed.isEmpty ? nil : typed
+            if password == nil, case .found(let saved) = await Blocking.run({ Keychain.password(for: id) }) {
+                password = saved
+            }
             guard let host = await Reachability.firstReachable(hosts: c.allHosts, port: c.effectivePort) else {
                 s.sharesError = tr("Server not reachable")
                 return
@@ -654,7 +661,13 @@ private struct ShareRow: View {
 private final class GeneralState: ObservableObject {
     @Published var launchAtLogin = LoginItem.isEnabled
     @Published var loginError: String?
-    @Published var inSidebar = FinderSidebar.contains(ConnectionManager.mountRoot)
+    /// nil until the (slow) sidebar lookup has answered.
+    @Published var inSidebar: Bool?
+
+    @MainActor
+    func loadSidebarState() async {
+        inSidebar = await FinderSidebar.isListed(ConnectionManager.mountRoot)
+    }
 }
 
 private struct GeneralSettingsView: View {
@@ -710,14 +723,18 @@ private struct GeneralSettingsView: View {
                     .buttonStyle(.link)
                 }
                 LabeledContent("Sidebar") {
-                    if state.inSidebar {
+                    switch state.inSidebar {
+                    case true?:
                         Label("Added", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
-                    } else {
+                    case false?:
                         Button("Add") {
-                            FinderSidebar.add(ConnectionManager.mountRoot)
-                            state.inSidebar = FinderSidebar.contains(ConnectionManager.mountRoot)
+                            let root = ConnectionManager.mountRoot
+                            FinderSidebar.perform { FinderSidebar.add(root) }
+                            Task { await state.loadSidebarState() }
                         }
+                    case nil:
+                        ProgressView().controlSize(.small)
                     }
                 }
             }
@@ -725,6 +742,7 @@ private struct GeneralSettingsView: View {
         .formStyle(.grouped)
         .navigationTitle("General")
         .safeAreaInset(edge: .bottom) { CreditFooter() }
+        .task { await state.loadSidebarState() }
     }
 }
 

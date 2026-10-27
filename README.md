@@ -77,7 +77,7 @@ make signing   # optional, once: local signing identity, see below
 make install   # builds, copies to ~/Applications and launches
 ```
 
-`make signing` creates a self-signed code signing certificate in your login keychain. With it, every build you make keeps the same identity, and macOS only asks once for access to the saved passwords. Without it, builds are signed ad hoc and macOS asks again after every rebuild.
+`make signing` creates a self-signed code signing certificate in your login keychain. With it, every build keeps the same code identity, so privacy permissions such as local network access survive rebuilds.
 
 | Command | What it does |
 |---|---|
@@ -152,7 +152,7 @@ Both tools only read passwords from a terminal, so they run under `expect` and r
 
 **Logged in as the wrong user.** On a domain-joined Mac, set **Connect via** to *IP address*. Check who is logged in with `mount | grep smbfs`; the user is shown in front of the server.
 
-**macOS asks for keychain access after every update.** Builds from source: run `make signing` once. Releases: see [docs/RELEASING.md](docs/RELEASING.md).
+**macOS asks for keychain access after every update.** Expected for now: without an Apple Team ID, macOS ties saved passwords to the exact app version. DriveDock keeps all server passwords in one keychain item, so it is one question per update – enter your password and choose *Always Allow*. Details in [docs/RELEASING.md](docs/RELEASING.md#code-signing).
 
 **Finder or other apps can't mount anything anymore.** That is the `NetAuthSysAgent` hang described above (DriveDock no longer triggers it for SMB). Quit it with `pkill NetAuthSysAgent`; macOS restarts it on demand.
 

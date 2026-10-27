@@ -224,9 +224,12 @@ struct Connection: Codable, Identifiable, Hashable {
     }
 
     static func folderName(_ s: String) -> String {
-        s.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        let cleaned = s.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
             .replacingOccurrences(of: "/", with: " - ")
             .replacingOccurrences(of: ":", with: "-")
+        // "." and ".." would point at the mount root or the home folder; leading dots would
+        // make the folder invisible in Finder.
+        return String(cleaned.drop(while: { $0 == "." }))
     }
 
     static func normalizedShare(_ s: String) -> String {
@@ -239,6 +242,8 @@ enum ConnectionStatus: Equatable {
     case paused
     case connecting
     case connected
+    /// Unmounting after the user switched the profile off.
+    case disconnecting
     /// Some shares mounted, others failed (e.g. one share no longer exists).
     case partial(mounted: Int, total: Int, detail: String)
     case unreachable
@@ -252,6 +257,7 @@ enum ConnectionStatus: Equatable {
         case .paused: tr("Disconnected (manually)")
         case .connecting: tr("Connecting …")
         case .connected: tr("Connected")
+        case .disconnecting: tr("Disconnecting …")
         case .partial(let mounted, let total, let detail): tr("%lld of %lld shares connected – %@", mounted, total, detail)
         case .unreachable: tr("Server not reachable – still trying")
         case .needsPassword: tr("No password saved")
@@ -263,7 +269,7 @@ enum ConnectionStatus: Equatable {
     var color: Color {
         switch self {
         case .connected: .green
-        case .connecting: .yellow
+        case .connecting, .disconnecting: .yellow
         case .unreachable, .partial: .orange
         case .disconnected, .paused: .gray
         case .needsPassword, .authFailed, .error: .red

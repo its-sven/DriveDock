@@ -5,6 +5,30 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] – 2026-10-27
+
+### Changed
+- All server passwords now live in a single keychain item. Without an Apple Team ID macOS asks
+  for keychain access after every update – now once instead of once per server. Passwords from
+  earlier versions are moved over automatically the first time they are needed.
+- Keychain access runs one call at a time in the background and is cached in memory: a pending
+  keychain prompt can no longer freeze the UI or hold up other servers, reconnects don't touch
+  the keychain, and a denied prompt is not repeated until you click *Connect*.
+- Switches and *Connect*/*Disconnect* react immediately; disconnecting shows "Disconnecting …"
+  and unmounts all shares of a server in parallel.
+- Shares appear one by one while a server connects instead of all at the end.
+- Finder sidebar lookups (*General* page, saving a server) run off the main thread.
+
+### Fixed
+- Servers that log in with the Mac's domain login no longer read the keychain at all.
+- Checking whether a share is mounted no longer touches the file system, which could stall
+  the UI when a server is unreachable.
+- A server named "." or ".." can't point its folder at the mount root or the home folder.
+
+### Documentation
+- Corrected: a self-signed certificate does not prevent the keychain prompt after updates
+  (only an Apple Team ID does); it keeps privacy permissions such as local network access.
+
 ## [0.5.1] – 2026-10-27
 
 ### Fixed
@@ -62,7 +86,8 @@ First public release.
 - Activity log at `~/Library/Logs/DriveDock.log`.
 - Universal build (Apple Silicon and Intel), DMG and ZIP releases, Homebrew cask.
 
-[Unreleased]: https://github.com/its-sven/DriveDock/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/its-sven/DriveDock/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/its-sven/DriveDock/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/its-sven/DriveDock/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/its-sven/DriveDock/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/its-sven/DriveDock/releases/tag/v0.4.0

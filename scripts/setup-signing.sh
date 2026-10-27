@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Creates a local, self-signed code signing identity "DriveDock Local Signing" in the
-# login keychain (once). build-app.sh signs with it, so DriveDock keeps the same identity
-# across rebuilds and macOS asks for keychain access only once ("Immer erlauben").
+# login keychain (once). build-app.sh signs with it, so DriveDock keeps the same code identity
+# across rebuilds and privacy permissions (e.g. local network) survive them. The keychain
+# still asks once after each rebuild – that only goes away with an Apple Team ID.
 # The certificate is not trusted system-wide and only used for signing this app.
 set -euo pipefail
 

@@ -276,13 +276,12 @@ enum MountTable {
         isMounted(url, in: mountPoints())
     }
 
-    /// Pure string comparison – resolving symlinks would touch the file system, which can
-    /// hang for a mount whose server is gone.
+    /// Pure string comparison. Resolving symlinks or even URL.standardizedFileURL touches the
+    /// file system (a reachability check on the network mount point), which costs a network
+    /// round trip per share on every UI render and can hang when the server is gone.
     static func isMounted(_ url: URL, in mounted: Set<String>) -> Bool {
         let path = url.path
-        let standardized = url.standardizedFileURL.path
-        return mounted.contains(path) || mounted.contains(standardized)
-            || mounted.contains("/private" + path) || mounted.contains("/private" + standardized)
+        return mounted.contains(path) || mounted.contains("/private" + path)
     }
 }
 

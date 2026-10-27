@@ -46,14 +46,14 @@ BUILD_NUMBER="${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)
 $PLIST_BUDDY -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 $PLIST_BUDDY -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
 
-# A stable identity keeps keychain access across updates; ad hoc signing changes the
-# app's identity with every build, so macOS asks for keychain access again.
+# A stable identity keeps privacy permissions across rebuilds; ad hoc signing changes the
+# app's code identity with every build.
 if [[ -z "${SIGN_IDENTITY:-}" ]]; then
   if security find-certificate -c "DriveDock Local Signing" >/dev/null 2>&1; then
     SIGN_IDENTITY="DriveDock Local Signing"
   else
     SIGN_IDENTITY="-"
-    echo "Note: signing ad hoc – run scripts/setup-signing.sh once to avoid keychain prompts after updates."
+    echo "Note: signing ad hoc – scripts/setup-signing.sh gives builds a stable code identity."
   fi
 fi
 codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$APP"

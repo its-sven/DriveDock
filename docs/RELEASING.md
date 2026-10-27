@@ -23,16 +23,22 @@ The workflow builds a universal app, packages `DriveDock-x.y.z.dmg`, `DriveDock-
 
 There are three levels:
 
-| | Gatekeeper on first launch | Keychain prompt after updates | Cost |
-|---|---|---|---|
-| Ad hoc (default) | "Open Anyway" needed | yes, after every update | – |
-| Self-signed release certificate | "Open Anyway" needed | no | – |
-| Apple Developer ID + notarization | opens normally | no | Apple Developer Program |
+| | Gatekeeper on first launch | Keychain prompt after updates | Privacy permissions (e.g. local network) after updates | Cost |
+|---|---|---|---|---|
+| Ad hoc (default) | "Open Anyway" needed | once per update | may be asked again | – |
+| Self-signed release certificate | "Open Anyway" needed | once per update | kept | – |
+| Apple-issued certificate with Team ID (Developer ID + notarization) | opens normally | no | kept | Apple Developer Program |
 
-### Self-signed release certificate (recommended for now)
+Why the keychain asks after updates without a Team ID: macOS binds keychain items to a
+*partition*. For apps with an Apple Team ID that is `teamid:…`, which stays the same across
+versions. For everything else it is the code hash of the binary, which changes with every
+build – a self-signed certificate doesn't help here. Since 0.5.2 DriveDock keeps all server
+passwords in one keychain item, so this is a single prompt per update, not one per server.
 
-Signing every release with the same certificate keeps the app's identity stable, so users
-grant keychain access once.
+### Self-signed release certificate (optional)
+
+Signing every release with the same certificate keeps the app's code identity stable, so
+privacy permissions such as local network access survive updates.
 
 ```bash
 scripts/make-release-cert.sh ~/drivedock-release-cert
@@ -41,14 +47,15 @@ scripts/make-release-cert.sh ~/drivedock-release-cert
 Add the two printed values as repository secrets **RELEASE_CERT_P12** and
 **RELEASE_CERT_PASSWORD** (*Settings → Secrets and variables → Actions*), store
 `release-signing.p12` somewhere safe, and delete the `.txt` files. Losing the certificate
-only means users get one more keychain prompt with the next release.
+only means users may have to grant privacy permissions once more with the next release.
 
 ### Developer ID (later)
 
 With a paid Apple Developer account, replace the signing step by a *Developer ID Application*
 certificate with hardened runtime (`codesign --options runtime --timestamp`), then notarize
 the DMG with `xcrun notarytool submit --wait` and staple it with `xcrun stapler staple`.
-After that, the quarantine workaround in the Homebrew cask and the README can go.
+After that, the quarantine workaround in the Homebrew cask and the README can go, and the
+keychain no longer asks after updates (stable `teamid:` partition).
 
 ## Homebrew
 
