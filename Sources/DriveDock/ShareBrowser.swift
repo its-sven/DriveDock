@@ -24,7 +24,7 @@ enum ShareBrowser {
                 "/usr/bin/smbutil", ["view", "-f", Mounter.smbURL(for: c, host: host, share: nil)],
                 password: password ?? "", timeout: 25)
         } else {
-            result = ToolRunner.run("/usr/bin/smbutil", ["view", "-N", "//\(host)"], timeout: 25)
+            result = ToolRunner.run("/usr/bin/smbutil", ["view", "-N", Mounter.smbURL(for: c, host: host, share: nil)], timeout: 25)
         }
         if result.timedOut {
             throw BrowseError(message: tr("Server not responding (timeout)"))
@@ -39,29 +39,66 @@ enum ShareBrowser {
                 .last { !$0.isEmpty } ?? tr("smbutil error %lld", Int(result.status))
             throw BrowseError(message: message.replacingOccurrences(of: "smbutil: ", with: ""))
         }
-        return parse(result.output)
+        let shares = parse(result.output)
+        // A server that answers without any listable share is far more likely a listing we
+        // couldn't read than a server without shares: report it instead of an empty list,
+        // which would make an "all shares" profile unmount everything.
+        if shares.isEmpty {
+            ActivityLog.write("Share list from \(host) could not be read (\(result.output.utf8.count) bytes):\n"
+                + result.output.split(separator: "\n").prefix(6).map { "    " + $0 }.joined(separator: "\n"))
+            throw BrowseError(message: tr("The server's share list could not be read"))
+        }
+        return shares
     }
 
+    /// Parses `smbutil view` output:
+    ///
+    ///     Share                                           Type    Comments
+    ///     -------------------------------
+    ///     EDV                                             Disk    IT department
+    ///
+    /// smbutil pads the share column to a fixed number of *bytes*, so the name is everything
+    /// before the byte column of "Type" in the header. Splitting at the first type word instead
+    /// breaks names like "USB Disk"; counting characters breaks names with umlauts or dashes.
     static func parse(_ output: String) -> [Share] {
-        // Lines look like "EDV        Disk    Comment"; names may contain spaces and the
-        // column padding is off for non-ASCII names, so split on the type column.
-        let pattern = try! NSRegularExpression(pattern: #"^(.+?)\s+(Disk|Printer|Pipe|Device)\b\s*(.*)$"#)
+        let lines = output.components(separatedBy: .newlines)
+        guard let headerIndex = lines.firstIndex(where: { $0.hasPrefix("Share") && $0.contains("Type") }),
+              let typeRange = lines[headerIndex].range(of: "Type") else { return [] }
+        let header = lines[headerIndex]
+        let typeColumn = header.utf8.distance(from: header.startIndex, to: typeRange.lowerBound)
+        let types: Set<String> = ["Disk", "Printer", "Pipe", "Device"]
+
         var shares: [Share] = []
-        for raw in output.components(separatedBy: .newlines) {
-            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            let range = NSRange(line.startIndex..., in: line)
-            guard let m = pattern.firstMatch(in: line, range: range),
-                  let name = Range(m.range(at: 1), in: line).map({ String(line[$0]) }),
-                  let type = Range(m.range(at: 2), in: line).map({ String(line[$0]) }),
-                  type == "Disk",
-                  name != "Share" else { continue }
-            let comment = Range(m.range(at: 3), in: line).map { String(line[$0]) } ?? ""
-            shares.append(Share(name: name.trimmingCharacters(in: .whitespaces), comment: comment))
+        for line in lines[(headerIndex + 1)...] {
+            let bytes = Array(line.utf8)
+            let name: String
+            let rest: String
+            if bytes.count > typeColumn, bytes[typeColumn - 1] == UInt8(ascii: " ") {
+                name = String(decoding: bytes[..<typeColumn], as: UTF8.self).trimmingCharacters(in: .whitespaces)
+                rest = String(decoding: bytes[typeColumn...], as: UTF8.self).trimmingCharacters(in: .whitespaces)
+            } else if let overflow = splitOverlongLine(line, types: types) {
+                // A name longer than the column pushes the type to the right.
+                (name, rest) = overflow
+            } else {
+                continue
+            }
+            let type = rest.prefix { !$0.isWhitespace }
+            guard !name.isEmpty, types.contains(String(type)), type == "Disk" else { continue }
+            let comment = rest.dropFirst(type.count).trimmingCharacters(in: .whitespaces)
+            shares.append(Share(name: name, comment: comment))
         }
         return shares.sorted {
             $0.isHidden == $1.isHidden
                 ? $0.name.localizedStandardCompare($1.name) == .orderedAscending
                 : !$0.isHidden
         }
+    }
+
+    private static func splitOverlongLine(_ line: String, types: Set<String>) -> (String, String)? {
+        let words = line.split(separator: " ", omittingEmptySubsequences: true)
+        guard let index = words.firstIndex(where: { types.contains(String($0)) }), index > 0 else { return nil }
+        let nameEnd = line.range(of: " " + words[index])!.lowerBound
+        return (String(line[..<nameEnd]).trimmingCharacters(in: .whitespaces),
+                String(line[nameEnd...]).trimmingCharacters(in: .whitespaces))
     }
 }

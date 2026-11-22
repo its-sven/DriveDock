@@ -133,6 +133,8 @@
 "Startup" = "Start";
 "Teal" = "Türkis";
 "The keychain didn't release the password – click Connect to try again" = "Der Schlüsselbund hat das Passwort nicht freigegeben – zum erneuten Versuch auf Verbinden klicken";
+"The server's share list could not be read" = "Die Freigabeliste des Servers konnte nicht gelesen werden";
+"The domain login (Kerberos) was refused – DriveDock keeps trying" = "Der Domänen-Login (Kerberos) wurde abgelehnt – DriveDock versucht es weiter";
 "The folder “%@” is itself a network drive – please disconnect it" = "Der Ordner „%@“ ist selbst ein Netzlaufwerk – bitte trennen";
 "the rest is not connected" = "Rest nicht verbunden";
 "The server lists these shares, but this user may not open them." = "Diese Freigaben listet der Server, der Benutzer darf sie aber nicht öffnen.";

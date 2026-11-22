@@ -27,9 +27,15 @@ enum Keychain {
     private static let service = "DriveDock"
     private static let vaultAccount = "passwords"
     private static let queue = DispatchQueue(label: "DriveDock.keychain")
+    /// Profiles whose password had to be stored in a per-profile item because the shared item
+    /// couldn't be read at that time. Those items are newer than the shared one and win.
+    private static let fallbackKey = "keychainFallbackProfiles"
 
-    // State below is only touched on `queue`.
+    /// Decoded shared item. Written on `queue`; read under `lock`, so passwords already known
+    /// are answered at once even while another call waits for a keychain prompt.
+    private static let lock = NSLock()
     private static var cache: [String: String]?
+    // Only touched on `queue`.
     /// Set when the shared item couldn't be read; no new prompt until a user action.
     private static var readFailed = false
 
@@ -37,18 +43,26 @@ enum Keychain {
 
     /// `allowPrompt: false` (automatic reconnects) doesn't ask again after the user denied access.
     static func password(for id: UUID, allowPrompt: Bool = true) -> Lookup {
-        queue.sync {
+        let account = id.uuidString
+        if !isFallback(account), let known = cached(account) { return .found(known) }
+        return queue.sync {
             guard let passwords = loadVault(allowPrompt: allowPrompt) else {
-                // The shared item is unreadable. Reading the fallback item could prompt as well,
-                // so only try it when asking is allowed.
-                if allowPrompt, let fallback = readItem(account: id.uuidString).value { return .found(fallback) }
+                // The shared item is unreadable; a password saved on its own meanwhile may exist.
+                if allowPrompt, isFallback(account), let fallback = readItem(account: account).value { return .found(fallback) }
                 return .unavailable
             }
-            if let password = passwords[id.uuidString] { return .found(password) }
-            switch readItem(account: id.uuidString) {
+            if isFallback(account), case .found(let newer) = readItem(account: account) {
+                var updated = passwords
+                updated[account] = newer
+                if writeVault(updated) { setFallback(account, false) }
+                return .found(newer)
+            }
+            if let password = passwords[account] { return .found(password) }
+            // Versions before 0.5.2: one item per profile – move it into the shared item.
+            switch readItem(account: account) {
             case .found(let legacy):
                 var updated = passwords
-                updated[id.uuidString] = legacy
+                updated[account] = legacy
                 writeVault(updated)
                 return .found(legacy)
             case .missing:
@@ -62,24 +76,31 @@ enum Keychain {
     /// Saves the password. Returns false if it couldn't be stored at all.
     @discardableResult
     static func setPassword(_ password: String, for id: UUID) -> Bool {
-        queue.sync {
+        let account = id.uuidString
+        return queue.sync {
             // Saving is a user action, so asking again after a denied prompt is fine.
             guard var passwords = loadVault(allowPrompt: true) else {
                 // Never overwrite a shared item we couldn't read – it holds the other
-                // profiles' passwords. Store this one on its own instead.
-                return writeItem(account: id.uuidString, data: Data(password.utf8))
+                // profiles' passwords. Store this one on its own and remember that it is newer.
+                let ok = writeItem(account: account, data: Data(password.utf8))
+                if ok { setFallback(account, true) }
+                return ok
             }
-            passwords[id.uuidString] = password
-            return writeVault(passwords)
+            passwords[account] = password
+            let ok = writeVault(passwords)
+            if ok { setFallback(account, false) }
+            return ok
         }
     }
 
     static func delete(for id: UUID) {
+        let account = id.uuidString
         queue.sync {
-            if var passwords = loadVault(allowPrompt: true), passwords.removeValue(forKey: id.uuidString) != nil {
+            if var passwords = loadVault(allowPrompt: true), passwords.removeValue(forKey: account) != nil {
                 writeVault(passwords)
             }
-            SecItemDelete(query(account: id.uuidString) as CFDictionary)
+            SecItemDelete(query(account: account) as CFDictionary)
+            setFallback(account, false)
         }
     }
 
@@ -94,18 +115,48 @@ enum Keychain {
 
     // MARK: - Shared item
 
-    /// The decoded passwords, or nil if the item exists but can't be read.
+    private static func cached(_ account: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return cache?[account]
+    }
+
+    private static func setCache(_ passwords: [String: String]) {
+        lock.lock(); defer { lock.unlock() }
+        cache = passwords
+    }
+
+    private static func isFallback(_ account: String) -> Bool {
+        UserDefaults.standard.stringArray(forKey: fallbackKey)?.contains(account) ?? false
+    }
+
+    private static func setFallback(_ account: String, _ on: Bool) {
+        var accounts = Set(UserDefaults.standard.stringArray(forKey: fallbackKey) ?? [])
+        guard accounts.contains(account) != on else { return }
+        if on { accounts.insert(account) } else { accounts.remove(account) }
+        UserDefaults.standard.set(Array(accounts), forKey: fallbackKey)
+    }
+
+    /// The decoded passwords, or nil if the item exists but can't be read or decoded.
     private static func loadVault(allowPrompt: Bool) -> [String: String]? {
-        if let cache { return cache }
+        lock.lock()
+        let current = cache
+        lock.unlock()
+        if let current { return current }
         if readFailed, !allowPrompt { return nil }
         switch readItem(account: vaultAccount) {
         case .found(let json):
-            let decoded = (try? JSONDecoder().decode([String: String].self, from: Data(json.utf8))) ?? [:]
-            cache = decoded
+            // Undecodable (damaged, or written by a newer version): treat as unreadable, so it
+            // is never overwritten with a list that would lack the other profiles' passwords.
+            guard let decoded = try? JSONDecoder().decode([String: String].self, from: Data(json.utf8)) else {
+                NSLog("DriveDock: the shared keychain item could not be decoded")
+                readFailed = true
+                return nil
+            }
+            setCache(decoded)
             readFailed = false
             return decoded
         case .missing:
-            cache = [:]
+            setCache([:])
             readFailed = false
             return [:]
         case .unavailable:
@@ -118,7 +169,7 @@ enum Keychain {
     private static func writeVault(_ passwords: [String: String]) -> Bool {
         guard let data = try? JSONEncoder().encode(passwords) else { return false }
         let ok = writeItem(account: vaultAccount, data: data)
-        if ok { cache = passwords }
+        if ok { setCache(passwords) }
         return ok
     }
 

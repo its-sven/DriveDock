@@ -86,14 +86,18 @@ enum ToolRunner {
     /// Answers the password prompt once; a second prompt means the password was wrong (exit 77).
     private static let script = #"""
     log_user 0
-    match_max 1000000
     set timeout $env(DD_TIMEOUT)
     spawn -noecho {*}$argv
+    # Per spawned process, so only after spawn. Expect's default keeps just the last 2000
+    # bytes – a longer share list would lose its header and read as empty.
+    match_max 4000000
     set sent 0
     # Take the spawned tool down with us – on our own timeout and when DriveDock stops us.
     trap { catch {exec kill -9 [exp_pid]}; exit 143 } {SIGTERM SIGHUP}
+    # Only a prompt at the very end of the output ("Password for server: ") – the word alone
+    # also appears in share names and comments of the listing that follows the login.
     expect {
-        -nocase "password" {
+        -nocase -re {password[^\n]*:[ \t]*$} {
             if {$sent} { catch {exec kill -9 [exp_pid]}; exit 77 }
             set sent 1
             send -- "$env(DD_PW)\r"

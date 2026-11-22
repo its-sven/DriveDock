@@ -61,15 +61,38 @@ final class ConnectionManager: ObservableObject {
     /// generation after one of its waits is outdated and takes back what it mounted.
     private var generation: [UUID: Int] = [:]
     private var unmounting: Set<String> = []
+    /// Automatic retries of a failing profile wait longer each time (20 s … 5 min), so a server
+    /// that is gone doesn't cost a login and a log line every 20 seconds. Reset by a manual
+    /// connect, waking up and network changes.
+    private var retryAfter: [UUID: Date] = [:]
+    private var failureCount: [UUID: Int] = [:]
+    private var pendingReconcile: Task<Void, Never>?
+    private var pendingReconcileDeadline: Date?
 
     private let store = ConnectionStore()
     private let pathMonitor = NWPathMonitor()
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
+    private var volumeEvents: VolumeEvents?
+    private var lastUnresponsiveNote = Date.distantPast
 
     init() {
         connections = store.load()
         start()
+    }
+
+    /// Demo instance for screenshots and UI tests: shows the given state and never starts
+    /// timers, mounts, keychain access or Finder changes.
+    init(demo connections: [Connection], status: [UUID: ConnectionStatus], discovered: [UUID: [ShareBrowser.Share]],
+         denied: [UUID: Set<String>], mountedShares: [UUID: [String]]) {
+        self.connections = connections
+        self.status = status
+        self.discovered = discovered
+        self.denied = denied
+        storedPasswords = Set(connections.filter(\.needsPassword).map(\.id))
+        mountedPaths = Set(connections.flatMap { c in
+            (mountedShares[c.id] ?? []).map { mountPoint(for: c, share: $0).path }
+        })
     }
 
     // MARK: - Lifecycle
@@ -82,18 +105,29 @@ final class ConnectionManager: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: Self.retryInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.reconcile() }
         }
+        timer?.tolerance = 5
 
+        // A new network (Wi-Fi, VPN up) or waking up is a good moment to try everything again.
         pathMonitor.pathUpdateHandler = { [weak self] path in
             guard path.status == .satisfied else { return }
-            Task { @MainActor in self?.reconcile(after: 2) }
+            Task { @MainActor in
+                self?.resetBackoff()
+                self?.reconcile(after: 2)
+            }
         }
         pathMonitor.start(queue: .global(qos: .utility))
 
         let center = NSWorkspace.shared.notificationCenter
-        for name in [NSWorkspace.didWakeNotification, NSWorkspace.didUnmountNotification] {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.reconcile(after: 3) }
-            })
+        observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.resetBackoff()
+                self?.reconcile(after: 3)
+            }
+        })
+        // A share ejected in Finder or dropped by the system: put it back. (Kernel events
+        // instead of NSWorkspace's mount notifications – see VolumeEvents.)
+        volumeEvents = VolumeEvents { [weak self] flags in
+            MainActor.assumeIsolated { self?.volumesChanged(flags) }
         }
 
         loadStoredPasswordFlags()
@@ -104,6 +138,18 @@ final class ConnectionManager: ObservableObject {
             FinderSidebar.perform { FinderSidebar.migrateToProfileFolders(root: root) }
             connections.forEach { self.prepareFinderEntry($0, addToSidebar: true) }
             reconcile()
+        }
+    }
+
+    private func volumesChanged(_ flags: UInt32) {
+        if flags & UInt32(VQ_NOTRESP | VQ_DEAD) != 0, Date().timeIntervalSince(lastUnresponsiveNote) > 300 {
+            lastUnresponsiveNote = Date()
+            ActivityLog.write(flags & UInt32(VQ_DEAD) != 0
+                ? "The system reports a dead network volume"
+                : "The system reports a network volume that isn't responding")
+        }
+        if flags & UInt32(VQ_UNMOUNT | VQ_DEAD) != 0 {
+            reconcile(after: 3)
         }
     }
 
@@ -131,49 +177,108 @@ final class ConnectionManager: ObservableObject {
         UserDefaults.standard.set(storedPasswords.map(\.uuidString), forKey: Self.storedPasswordsKey)
     }
 
+    /// Coalesces bursts (a network change sends several events, a dropped server one unmount
+    /// event per share) into a single reconcile at the earliest requested time.
     func reconcile(after delay: TimeInterval) {
-        Task {
+        let deadline = Date().addingTimeInterval(delay)
+        if let pending = pendingReconcileDeadline, pending <= deadline { return }
+        pendingReconcile?.cancel()
+        pendingReconcileDeadline = deadline
+        pendingReconcile = Task {
             try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            pendingReconcileDeadline = nil
             reconcile()
         }
+    }
+
+    private func resetBackoff() {
+        retryAfter.removeAll()
+        failureCount.removeAll()
+    }
+
+    private func noteFailure(_ id: UUID) {
+        let count = (failureCount[id] ?? 0) + 1
+        failureCount[id] = count
+        let delay = min(Self.retryInterval * pow(2, Double(count - 1)), 300)
+        retryAfter[id] = Date().addingTimeInterval(delay)
+    }
+
+    private func noteSuccess(_ id: UUID) {
+        failureCount[id] = nil
+        retryAfter[id] = nil
+    }
+
+    private func mayRetry(_ id: UUID) -> Bool {
+        guard let after = retryAfter[id] else { return true }
+        return Date() >= after
     }
 
     /// Compares the desired state with the mount table and connects what is missing.
     func reconcile() {
         let mounted = refreshMountTable()
+        cleanUpOrphanMounts(mounted)
         for c in connections where !inFlight.contains(c.id) {
             if paused.contains(c.id) {
                 // Keep a disconnected profile disconnected, also against mounts that finished late.
-                let leftovers = mountsInside(c, mounted: mounted)
-                if !leftovers.isEmpty { unmount(leftovers) }
-                setStatus(.paused, for: c.id)
+                let leftovers = mountsInside(c, mounted: mounted).filter { !unmounting.contains($0.path) }
+                if leftovers.isEmpty {
+                    if !mountsInside(c, mounted: mounted).isEmpty { continue }   // still unmounting
+                    setStatus(.paused, for: c.id)
+                } else {
+                    unmount(leftovers) { [weak self] errors in
+                        guard let self, paused.contains(c.id) else { return }
+                        setStatus(errors.first.map { .error(tr("Disconnecting failed: %@", $0.localizedDescription)) } ?? .paused, for: c.id)
+                    }
+                }
                 continue
             }
             pruneMounts(of: c, mounted: mounted)
             let wanted = targets(of: c)
             let mountedCount = wanted.filter { MountTable.isMounted(mountPoint(for: c, share: $0), in: mounted) }.count
-            let fresh = !needsDiscovery(c)
 
-            if fresh, !wanted.isEmpty, mountedCount == wanted.count {
+            if !wanted.isEmpty, mountedCount == wanted.count {
                 setStatus(.connected, for: c.id)
+                // "All shares": look for new or removed shares now and then, without showing
+                // "Connecting" for it.
+                if c.autoConnect, needsDiscovery(c), mayRetry(c.id) { connect(c, manual: false) }
                 continue
             }
             if authBlocked.contains(c.id) { continue }
-            if c.mountsAll, fresh, wanted.isEmpty {
+            if c.mountsAll, !needsDiscovery(c), wanted.isEmpty {
                 setStatus(.error(tr("No accessible shares found")), for: c.id)
                 continue
             }
             guard c.autoConnect else {
+                // Manual profiles keep what the last manual connect reported (error, password
+                // missing, unreachable …); only plain states are updated here.
                 if mountedCount > 0 {
                     setStatus(.partial(mounted: mountedCount, total: wanted.count, detail: tr("the rest is not connected")), for: c.id)
-                } else if case .error = status(of: c) {
-                    // keep the last error visible
-                } else {
+                } else if [nil, .connected, .connecting].contains(status[c.id]) || status(of: c).isPartial {
                     setStatus(.disconnected, for: c.id)
                 }
                 continue
             }
+            guard mayRetry(c.id) else { continue }
             if !wanted.isEmpty || c.mountsAll { connect(c, manual: false) }
+        }
+    }
+
+    /// Mounts below the mount root that belong to no profile (left over after a rename or a
+    /// delete while a share was busy) are unmounted, and their empty folders removed.
+    private func cleanUpOrphanMounts(_ mounted: Set<String>) {
+        let root = Self.mountRoot.path + "/"
+        let owned = connections.map { profileFolder(for: $0).path + "/" }
+        let orphans = mounted
+            .filter { $0.hasPrefix(root) && !owned.contains(where: $0.hasPrefix) && !unmounting.contains($0) }
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+        guard !orphans.isEmpty else { return }
+        ActivityLog.write("Unmounting \(orphans.count) share(s) that belong to no server anymore")
+        unmount(orphans) { _ in
+            for folder in Set(orphans.map { $0.deletingLastPathComponent() }) where folder.path + "/" != root {
+                unlink(folder.appendingPathComponent("Icon\r").path)
+                Mounter.removeIfEmpty(folder)
+            }
         }
     }
 
@@ -213,6 +318,8 @@ final class ConnectionManager: ObservableObject {
 
     /// Shares the profile should have mounted, before permission problems.
     func activeShares(of c: Connection) -> [String] {
+        // WebDAV without a path mounts the server root.
+        if c.kind != .smb, c.shares.isEmpty { return [""] }
         guard c.mountsAll else { return c.shares }
         return (discovered[c.id] ?? [])
             .filter { c.includeHiddenShares || !$0.isHidden }
@@ -248,8 +355,9 @@ final class ConnectionManager: ObservableObject {
 
     /// Unmounts shares that were deselected, excluded or removed on the server.
     private func pruneMounts(of c: Connection, mounted: Set<String>) {
-        // Without a discovery the wanted list of an "all shares" profile is still unknown.
-        if c.mountsAll, discovered[c.id] == nil { return }
+        // Without a discovery the wanted list of an "all shares" profile is still unknown – and
+        // an empty one is never a reason to unmount everything.
+        if c.mountsAll, discovered[c.id]?.isEmpty ?? true { return }
         let wanted = Set(targets(of: c).map { mountPoint(for: c, share: $0).path })
         let stale = mountsInside(c, mounted: mounted).filter { !wanted.contains($0.path) }
         if !stale.isEmpty { unmount(stale) }
@@ -267,7 +375,7 @@ final class ConnectionManager: ObservableObject {
 
     func mountPoint(for c: Connection, share: String) -> URL {
         let name = Connection.folderName(Connection.normalizedShare(share))
-        return profileFolder(for: c).appendingPathComponent(name.isEmpty ? "Share" : name, isDirectory: true)
+        return profileFolder(for: c).appendingPathComponent(name.isEmpty ? Connection.folderName(c.host) : name, isDirectory: true)
     }
 
     private func prepareFinderEntry(_ c: Connection, addToSidebar: Bool = false) {
@@ -288,15 +396,16 @@ final class ConnectionManager: ObservableObject {
     private func removeFinderEntry(_ c: Connection) {
         let folder = profileFolder(for: c)
         let id = c.id
+        // The sidebar entry first: once the folder is gone it can no longer be matched.
         FinderSidebar.perform {
             FinderSidebar.remove(folder)
             FinderSidebar.forget(id)
+            if let items = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
+                items.forEach(Mounter.removeIfEmpty)
+            }
+            unlink(folder.appendingPathComponent("Icon\r").path)
+            Mounter.removeIfEmpty(folder)
         }
-        if let items = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
-            items.forEach(Mounter.removeIfEmpty)
-        }
-        unlink(folder.appendingPathComponent("Icon\r").path)
-        Mounter.removeIfEmpty(folder)
     }
 
     /// Up to 0.2 the share was mounted directly on the profile folder; move such mounts.
@@ -320,11 +429,13 @@ final class ConnectionManager: ObservableObject {
         generation[id, default: 0] += 1
     }
 
-    func connect(_ c: Connection, manual: Bool = true) {
-        guard connections.contains(where: { $0.id == c.id }) else { return }
+    func connect(_ requested: Connection, manual: Bool = true) {
+        // Always the current version: callers may hold a copy from before an edit.
+        guard let c = connections.first(where: { $0.id == requested.id }) else { return }
         if manual {
             paused.remove(c.id)
             authBlocked.remove(c.id)
+            noteSuccess(c.id)
         }
         guard !inFlight.contains(c.id) else {
             // Don't drop it: run it as soon as the current attempt ends.
@@ -340,8 +451,10 @@ final class ConnectionManager: ObservableObject {
 
         inFlight.insert(c.id)
         let attempt = generation[c.id, default: 0]
-        // While waiting for an unreachable server, keep showing that instead of flickering.
-        if manual || status[c.id] != .unreachable { setStatus(.connecting, for: c.id) }
+        // Automatic retries keep showing a settled status (connected, unreachable, partial …)
+        // instead of flickering to "Connecting" and back every time.
+        let unsettled: [ConnectionStatus?] = [nil, .disconnected, .paused, .connecting]
+        if manual || unsettled.contains(status[c.id]) { setStatus(.connecting, for: c.id) }
         prepareFinderEntry(c)
 
         Task { @MainActor in
@@ -357,6 +470,7 @@ final class ConnectionManager: ObservableObject {
                     password = found
                 case .missing:
                     setStatus(.needsPassword, for: c.id)
+                    noteFailure(c.id)
                     return finishConnect(c, attempt: attempt, mounted: [])
                 case .unavailable:
                     // Like a failed login: no automatic retries until the user connects again.
@@ -366,7 +480,10 @@ final class ConnectionManager: ObservableObject {
                 }
             }
             guard let host = await Reachability.firstReachable(hosts: c.allHosts, port: c.effectivePort) else {
-                if isCurrent(c.id, attempt: attempt) { setStatus(.unreachable, for: c.id) }
+                if isCurrent(c.id, attempt: attempt) {
+                    setStatus(.unreachable, for: c.id)
+                    noteFailure(c.id)
+                }
                 return finishConnect(c, attempt: attempt, mounted: [])
             }
             guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: []) }
@@ -378,7 +495,8 @@ final class ConnectionManager: ObservableObject {
             var loginVerified = false
             if c.kind == .smb {
                 do {
-                    let shares = try await Blocking.run { try ShareBrowser.list(c, host: host, password: password) }
+                    let login = password
+                    let shares = try await Blocking.run { try ShareBrowser.list(c, host: host, password: login) }
                     guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: []) }
                     if discovered[c.id] != shares { discovered[c.id] = shares }
                     discoveredAt[c.id] = Date()
@@ -386,13 +504,25 @@ final class ConnectionManager: ObservableObject {
                     loginVerified = true
                 } catch let error as ShareBrowser.BrowseError where error.isAuthFailure {
                     guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: []) }
-                    authBlocked.insert(c.id)
-                    setStatus(.authFailed, for: c.id)
+                    if c.needsPassword {
+                        // A stored password was rejected: stop, so the account doesn't get locked.
+                        authBlocked.insert(c.id)
+                        setStatus(.authFailed, for: c.id)
+                    } else {
+                        // Domain login: usually an expired Kerberos ticket (e.g. after sleeping
+                        // until VPN or SSO renews it). No lockout risk – keep retrying, slower.
+                        setStatus(.error(tr("The domain login (Kerberos) was refused – DriveDock keeps trying")), for: c.id)
+                        noteFailure(c.id)
+                    }
                     return finishConnect(c, attempt: attempt, mounted: [])
                 } catch {
                     guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: []) }
+                    // Keep using the last share list; ask the server again only at the next
+                    // regular rediscovery instead of on every retry.
+                    discoveredAt[c.id] = Date()
                     if c.mountsAll, discovered[c.id] == nil {
                         setStatus(.error(tr("Could not load the shares: %@", error.localizedDescription)), for: c.id)
+                        noteFailure(c.id)
                         return finishConnect(c, attempt: attempt, mounted: [])
                     }
                 }
@@ -410,8 +540,8 @@ final class ConnectionManager: ObservableObject {
 
             // Show shares as they come in, not only once all of them are done.
             let results = await Self.mount(todo, of: c, host: host, password: password,
-                                           parallel: c.kind == .smb ? Self.parallelMounts : 1) { [weak self] in
-                await self?.scheduleMountTableRefresh()
+                                           parallel: c.kind == .smb ? Self.parallelMounts : 1) {
+                await self.scheduleMountTableRefresh()
             }
             let mountedByThisAttempt = results.filter { $0.error == nil }.map { mountPoint(for: c, share: $0.share) }
             guard isCurrent(c.id, attempt: attempt) else { return finishConnect(c, attempt: attempt, mounted: mountedByThisAttempt) }
@@ -427,23 +557,31 @@ final class ConnectionManager: ObservableObject {
             let authFailures = results.filter { ($0.error as? MountError)?.isAuthFailure == true }.map(\.share)
             // Windows answers "not found" instead of "access denied" for e.g. C$ when the user
             // lacks rights; a share the server just listed does exist, so that means no access.
-            let listed = Set((discovered[c.id] ?? []).map(\.name))
+            // Compared by top-level share, case-insensitively ("Data/Projects" belongs to "DATA").
+            let listed = Set((discovered[c.id] ?? []).map { $0.name.lowercased() })
+            func isListed(_ share: String) -> Bool {
+                listed.contains(String(share.split(separator: "/").first ?? "").lowercased())
+            }
             let nowMounted = MountTable.mountPoints()
             let mountedNow = wanted.filter { MountTable.isMounted(mountPoint(for: c, share: $0), in: nowMounted) }
             // Same for shares that never answer while other shares of the same login do mount
             // (a successful listing is not enough: then the whole server may be the problem).
             let hiddenFromUser = results
                 .filter { result in
-                    guard let code = (result.error as? MountError)?.code, listed.contains(result.share) else { return false }
+                    guard let code = (result.error as? MountError)?.code, isListed(result.share) else { return false }
                     return code == ENOENT || (code == ETIMEDOUT && !mountedNow.isEmpty)
                 }
                 .map(\.share)
             if !authFailures.isEmpty {
                 if loginVerified || !mountedNow.isEmpty {
                     addDenied(authFailures, for: c.id)
-                } else {
+                } else if c.needsPassword {
                     authBlocked.insert(c.id)
                     setStatus(.authFailed, for: c.id)
+                    return finishConnect(c, attempt: attempt, mounted: [])
+                } else {
+                    setStatus(.error(tr("The domain login (Kerberos) was refused – DriveDock keeps trying")), for: c.id)
+                    noteFailure(c.id)
                     return finishConnect(c, attempt: attempt, mounted: [])
                 }
             }
@@ -456,6 +594,7 @@ final class ConnectionManager: ObservableObject {
 
             let total = targets(of: c).count
             if total == 0, !results.isEmpty {
+                noteFailure(c.id)
                 let names = (denied[c.id] ?? []).sorted().joined(separator: ", ")
                 setStatus(.error(failures.isEmpty
                     ? tr("No access to %@ – the login works, but the server refuses these shares", names)
@@ -467,6 +606,7 @@ final class ConnectionManager: ObservableObject {
             } else {
                 setStatus(.error(failures.isEmpty ? tr("No share connected") : failures.joined(separator: "; ")), for: c.id)
             }
+            if mountedNow.count == total { noteSuccess(c.id) } else { noteFailure(c.id) }
             finishConnect(c, attempt: attempt, mounted: [])
         }
     }
@@ -589,7 +729,10 @@ final class ConnectionManager: ObservableObject {
 
     func openInFinder(_ c: Connection, share: String? = nil) {
         prepareFinderEntry(c)
-        NSWorkspace.shared.open(share.map { mountPoint(for: c, share: $0) } ?? profileFolder(for: c))
+        let url = share.map { mountPoint(for: c, share: $0) } ?? profileFolder(for: c)
+        // Off the main thread: opening checks the folder, and a share whose server is gone
+        // would block until the SMB timeout.
+        Task { await Blocking.run { _ = NSWorkspace.shared.open(url) } }
     }
 
     // MARK: - Editing
@@ -599,6 +742,7 @@ final class ConnectionManager: ObservableObject {
         var c = connection
         c.name = uniqueName(c.name.trimmingCharacters(in: .whitespaces), excluding: c.id)
         c.shares = c.shares.map(Connection.normalizedShare).filter { !$0.isEmpty }
+        noteSuccess(c.id)
         authBlocked.remove(c.id)
         paused.remove(c.id)
         setStatus(nil, for: c.id)
@@ -621,7 +765,9 @@ final class ConnectionManager: ObservableObject {
         Task {
             let stored = await Blocking.run { Keychain.setPassword(password, for: id) }
             if stored { setPasswordStored(true, for: id) }
-            applySaved(c, old: old, passwordChanged: true)
+            // The profile may have been edited again or removed meanwhile.
+            guard let current = connections.first(where: { $0.id == id }) else { return }
+            applySaved(current, old: old, passwordChanged: true)
         }
     }
 
@@ -654,12 +800,12 @@ final class ConnectionManager: ObservableObject {
         discoveredAt[c.id] = nil
         denied[c.id] = nil
         unmount(mountsInside(old, mounted: MountTable.mountPoints())) { [weak self] _ in
-            guard let self else { return }
-            if old.mountFolderName != c.mountFolderName {
+            guard let self, let current = connections.first(where: { $0.id == c.id }) else { return }
+            if old.mountFolderName != current.mountFolderName {
                 removeFinderEntry(old)
-                prepareFinderEntry(c, addToSidebar: true)
+                prepareFinderEntry(current, addToSidebar: true)
             }
-            if c.autoConnect { connect(c) } else { reconcile() }
+            if current.autoConnect { connect(current) } else { reconcile() }
         }
     }
 

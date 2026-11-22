@@ -66,6 +66,8 @@ if (( INSTALL )); then
   sleep 1
   rm -rf "$DEST/$APP_NAME.app"
   cp -R "$APP" "$DEST/"
-  open "$DEST/$APP_NAME.app"
+  # -n: a quit instance that still hangs in the kernel (e.g. on an unresponsive share) would
+  # make a plain `open` fail. DriveDock itself makes sure only one instance keeps running.
+  open -n "$DEST/$APP_NAME.app"
   echo "Installed and launched $DEST/$APP_NAME.app"
 fi

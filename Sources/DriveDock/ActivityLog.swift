@@ -3,8 +3,10 @@ import Foundation
 /// Plain-text log at ~/Library/Logs/DriveDock.log (opens in Console.app), so connection
 /// problems can be traced afterwards. Kept small by rotating at 1 MB.
 enum ActivityLog {
-    static let url = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/DriveDock.log")
+    /// Only the app itself writes the user's log; test runs write to a temporary file.
+    static let url = Bundle.main.bundleIdentifier == "io.github.its-sven.DriveDock"
+        ? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/DriveDock.log")
+        : FileManager.default.temporaryDirectory.appendingPathComponent("DriveDock-tests.log")
 
     private static let queue = DispatchQueue(label: "DriveDock.ActivityLog")
     private static let formatter: ISO8601DateFormatter = {

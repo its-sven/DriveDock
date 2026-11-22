@@ -2,10 +2,15 @@ import Foundation
 import ServiceManagement
 
 enum LoginItem {
-    static var isEnabled: Bool { SMAppService.mainApp.status == .enabled }
+    /// Demo mode: shown and switched without touching the real login item.
+    static var demoValue: Bool?
+
+    static var isEnabled: Bool { demoValue ?? (SMAppService.mainApp.status == .enabled) }
 
     static func set(_ enabled: Bool) throws {
-        if enabled {
+        if demoValue != nil {
+            demoValue = enabled
+        } else if enabled {
             try SMAppService.mainApp.register()
         } else {
             try SMAppService.mainApp.unregister()

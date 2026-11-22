@@ -12,6 +12,9 @@ Remove server names, user names and IP addresses you don't want to share.
 
 - Requirements: macOS 26 or later and the Xcode Command Line Tools. Full Xcode works too but isn't needed.
 - `make signing` once, then `make install` to build and run your changes.
+- `make test` runs the unit tests, `make check` the translation check – CI runs both.
+- `make demo` opens DriveDock with made-up servers, so you can try the UI without a file
+  server. If your change alters the UI, `make screenshots` re-captures the README images.
 - The project is a plain Swift package (`Package.swift`); `scripts/build-app.sh` turns the
   binary into an app bundle.
 - Views keep their state in small `ObservableObject`s instead of `@State`, because `@State`

@@ -10,6 +10,9 @@ private enum SidebarItem: Hashable {
     case general
 }
 
+/// The window is rebuilt every time it opens; remember the last server for the next time.
+@MainActor private var lastSelectedServer: UUID?
+
 private final class SettingsState: ObservableObject {
     @Published var selection: SidebarItem?
     @Published var draft: Connection?
@@ -21,6 +24,9 @@ private final class SettingsState: ObservableObject {
 struct SettingsView: View {
     @EnvironmentObject private var manager: ConnectionManager
     @StateObject private var state = SettingsState()
+    /// Opens on the General page instead of a server (used for screenshots).
+    var startOnGeneral = false
+    @FocusState private var sidebarFocused: Bool
 
     var body: some View {
         NavigationSplitView {
@@ -48,6 +54,10 @@ struct SettingsView: View {
                 }
             }
             .navigationSplitViewColumnWidth(min: 230, ideal: 250)
+            // Start with the server list focused instead of the first text field (see
+            // ServerWindowController.makeWindow). Arrow keys switch servers.
+            .focused($sidebarFocused)
+            .defaultFocus($sidebarFocused, true)
             .toolbar {
                 ToolbarItem {
                     Button {
@@ -61,13 +71,19 @@ struct SettingsView: View {
         } detail: {
             detail
         }
+        .frame(minWidth: 820, minHeight: 560)
         .onChange(of: state.selection) { _, new in
+            if case .server(let id) = new { lastSelectedServer = id }
             if case .new = new { return }
             state.draft = nil
         }
         .onAppear {
             guard state.selection == nil else { return }
-            if let first = manager.connections.first {
+            if startOnGeneral {
+                state.selection = .general
+            } else if let last = lastSelectedServer, manager.connections.contains(where: { $0.id == last }) {
+                state.selection = .server(last)
+            } else if let first = manager.connections.first {
                 state.selection = .server(first.id)
             } else {
                 addServer()
@@ -248,7 +264,7 @@ struct ServerEditor: View {
         let c = edited
         return !c.name.isEmpty
             && !c.host.isEmpty
-            && (c.mountsAll || !c.shares.isEmpty)
+            && (c.mountsAll || !c.shares.isEmpty || c.kind != .smb)   // WebDAV without a path = server root
             && (!c.needsPassword || (!c.username.isEmpty && (hasStoredPassword || !s.password.isEmpty)))
     }
 
@@ -305,7 +321,10 @@ struct ServerEditor: View {
             HStack(spacing: 14) {
                 ServerTile(status: isNew ? .disconnected : status, color: s.draft.color.color, size: 54)
                 VStack(alignment: .leading, spacing: 4) {
+                    // Inside a Form a TextField shows its title as a row label – here only the
+                    // editable name itself should appear, big, like a title.
                     TextField("Name", text: $s.draft.name, prompt: Text("Name, e.g. Fileserver (Admin)"))
+                        .labelsHidden()
                         .textFieldStyle(.plain)
                         .font(.title2.weight(.semibold))
                     Text(isNew ? tr("New server – not saved yet") : status.label)
@@ -613,7 +632,8 @@ struct ServerEditor: View {
                 return
             }
             do {
-                s.available = try await Blocking.run { try ShareBrowser.list(c, host: host, password: password) }
+                let login = password
+                s.available = try await Blocking.run { try ShareBrowser.list(c, host: host, password: login) }
                 if s.available.isEmpty { s.sharesError = tr("The server offers no shares") }
             } catch {
                 s.sharesError = error.localizedDescription

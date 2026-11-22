@@ -3,7 +3,8 @@ import SwiftUI
 
 struct MenuView: View {
     @EnvironmentObject private var manager: ConnectionManager
-    @Environment(\.openWindow) private var openWindow
+    /// Closes the popover and opens the server window.
+    let openServers: () -> Void
 
     var body: some View {
         VStack(spacing: 12) {
@@ -104,8 +105,7 @@ struct MenuView: View {
     }
 
     private func openManager() {
-        openWindow(id: WindowID.connections)
-        NSApp.activate(ignoringOtherApps: true)
+        openServers()
     }
 }
 

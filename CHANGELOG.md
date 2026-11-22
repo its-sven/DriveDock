@@ -5,6 +5,42 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] – 2026-11-22
+
+### Changed
+- Much lighter over long uptimes: the menu and the server window are now built when they open
+  and released completely when they close. Before, their hidden views kept re-rendering on every
+  status change and grew to 150 MB after nine days; DriveDock now stays around 15 MB.
+- Servers that stay unreachable are retried less and less often (20 seconds up to 5 minutes)
+  instead of every 20 seconds; waking up, a new network or *Connect* tries again right away.
+  Bursts of events (wake, network change, unmounts) lead to a single check.
+- A server that still has all its shares mounted is shown as connected right away after a
+  restart, without logging in to it again first.
+- Opening the server window no longer puts the cursor into the server name field.
+
+### Fixed
+- Servers with long share lists (more than about 2 KB of `smbutil` output, e.g. with many home
+  shares) read as an empty list when logging in with user and password, and a profile with
+  *Connect All Shares* then disconnected all its shares. The full list is read now, and an
+  empty list is treated as an error and never disconnects anything.
+- DriveDock could hang when quitting – and then not start again – while a server stopped
+  answering in the middle of a reconnect: AppKit's volume observer read the hanging volume.
+  Unmounts are now noticed through kernel events, which touch no volume.
+- A share or comment containing the word "password" could make a login look rejected.
+- Share names with spaces or umlauts (e.g. "USB Disk") were cut off or skipped.
+- An expired Kerberos ticket on domain-login servers stopped all retries like a wrong password.
+- A damaged `connections.json` or keychain entry could be overwritten by the next save; a copy
+  of the server list is now kept, and unreadable entries no longer take the others with them.
+- Empty share folders left behind by a crash are cleaned up; WebDAV servers can be added
+  without a path.
+- *Open in Finder* and removing a server's Finder entry no longer block the UI.
+- A second DriveDock started at login while another one was still quitting no longer exits.
+
+### Added
+- Unit tests (`make test`, also run on every push).
+- Demo mode with made-up servers (`make demo`) and `make screenshots`, which captures the
+  README screenshots from it.
+
 ## [0.5.2] – 2026-10-27
 
 ### Changed
@@ -86,7 +122,8 @@ First public release.
 - Activity log at `~/Library/Logs/DriveDock.log`.
 - Universal build (Apple Silicon and Intel), DMG and ZIP releases, Homebrew cask.
 
-[Unreleased]: https://github.com/its-sven/DriveDock/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/its-sven/DriveDock/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/its-sven/DriveDock/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/its-sven/DriveDock/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/its-sven/DriveDock/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/its-sven/DriveDock/compare/v0.4.0...v0.5.0

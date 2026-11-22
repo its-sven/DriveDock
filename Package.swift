@@ -12,6 +12,11 @@ let package = Package(
                 .linkedFramework("NetFS"),
                 .linkedFramework("ServiceManagement"),
             ]
-        )
+        ),
+        .testTarget(
+            name: "DriveDockTests",
+            dependencies: ["DriveDock"],
+            path: "Tests/DriveDockTests"
+        ),
     ]
 )
